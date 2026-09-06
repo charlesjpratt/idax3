@@ -4,23 +4,27 @@
     "height": 600
   },
   "background": {
-    "color": "#ADD8E6"
+    "color": "#000000"
   },
   "square": {
-    "width": 260,
-    "height": 260,
-    "speed": 130,
-    "color": "#3A3A3A",
+    "width": 280,
+    "height": 280,
+    "speed": 190,
+    "acceleration": 650,
+    "friction": 4200,
+    "color": "#7FFFD4",
+    "outline": 3,
+    "idle_alpha": 0.5,
     "shrink_rate": 1,
     "min_size": 30
   },
   "circle": {
-    "diameter": 35,
+    "diameter": 30,
     "speed": 170,
-    "color": "#FF69B4",
+    "color": "#FF1493",
     "start_x": 0.5,
     "start_y": 0.65,
-    "growth_per_diamond": 1.1,
+    "growth_per_diamond": 1.05,
     "collider_scale": 0.75
   },
   "star": {
@@ -32,13 +36,38 @@
     "pause": 0.6,
     "seek_speed": 0.8,
     "hold": 3,
-    "spin_speed": 1.0
+    "spin_speed": 1.0,
+    "unlock_diamonds": 3
   },
-  "triangle": {
+  "diamond": {
+    "edge_margin_x": 60,
+    "edge_margin_y": 42
+  },
+  "hexagon": {
+    "size": 14,
+    "color": "#7FFFD4",
+    "spin_speed": 0.12,
+    "grow_rate": 120,
+    "gap_min": 22,
+    "gap_max": 40,
+    "unlock_diamonds": 7
+  },
+  "moving_hazard": {
     "size": 16,
-    "color": "#E23A2E",
-    "speed": 220,
+    "color": "#FF2400",
+    "speed": 660,
+    "warn": 2,
     "gap_min": 7,
-    "gap_max": 15
+    "gap_max": 15,
+    "unlock_diamonds": 8
+  },
+  "still_hazard": {
+    "size": 16,
+    "color": "#FF2400",
+    "gap_min": 5,
+    "gap_max": 11,
+    "arm": 2,
+    "life": 4,
+    "unlock_diamonds": 5
   }
 }

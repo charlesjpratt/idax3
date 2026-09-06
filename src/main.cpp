@@ -52,6 +52,7 @@ constexpr float kScoreScale   = 0.60f; // of a field diamond
 constexpr float kScoreSpacing = 18.0f; // center to center
 constexpr float kScoreBottom  = 22.0f; // center's distance from the bottom edge
 
+
 // What eating one is worth: the speed wears off, the size stays. How much size
 // is `circle.growth_per_diamond` in config.json, so it is tunable with R.
 constexpr float kBoostTime  = 4.0f;  // seconds of extra speed
@@ -82,6 +83,7 @@ constexpr float kPupilThin    = 0.72f; // capsule cap radius, per pupil radius
 constexpr float kEyeTurnRate = 9.0f;  // radians per second
 constexpr float kEyeAimed    = 0.02f; // close enough to call the turn finished
 constexpr float kGazeRate    = 4.0f;  // how fast the pupil slides out and back
+constexpr float kSquareFadeRate = 6.0f; // how fast the frame firms up and dims
 
 // Bounds on the eye's turn itself, measured from the end of `star.pause`: the
 // floor keeps the hold from counting as "already aimed", the ceiling is there in
@@ -89,10 +91,28 @@ constexpr float kGazeRate    = 4.0f;  // how fast the pupil slides out and back
 constexpr float kStarTurnMin = 0.15f;
 constexpr float kStarTurnMax = 1.9f;
 
-// Red triangles. Their size, color, speed and rate are config; what stays here
-// is how hard they are to hit and how they come apart.
-constexpr int   kTriangleMax   = 4;     // on screen at once
+// A hexagon wins back this much of the ground the square has lost: half the gap
+// between where it has shrunk to and where it started.
+constexpr float kHexRecovery = 0.5f;
+constexpr float kSpawnPad = 10.0f; // breathing room between anything spawned
+
+// Red hazards. Sizes, colors, speeds, rates and unlocks are the two hazard
+// sections of config.json; what stays here is how hard they are to hit and how
+// they come apart.
+constexpr int   kHazardMax     = 8;     // moving and still ones together
 constexpr float kTriangleHit   = 0.60f; // collision radius, per triangle size
+constexpr float kPairOffset    = 0.50f; // half the gap in a pair, per size: the
+                                        // two triangles overlap at this range
+// A still triangle comes in one of three sizes, evenly drawn: the configured
+// one, half again, or double.
+constexpr int   kStillSizeCount = 3;
+constexpr float kStillSizeStep  = 0.5f;
+// Once armed it buzzes on the spot, which is the tell that it can hurt you.
+constexpr float kStillBuzz     = 0.10f; // amplitude, per hazard size
+constexpr float kStillBuzzRate = 38.0f; // radians per second
+// The lane a crossing will take, shown before it sets off.
+constexpr float kStripHalfWidth = 0.95f; // per hazard size
+constexpr Uint8 kStripAlpha     = 60;
 constexpr int   kTriShardCount = 10;
 constexpr float kTriShardSpeed = 240.0f;
 
@@ -121,10 +141,23 @@ struct Diamond {
     bool active = false;
 };
 
+// One hazard, either kind. A moving one is a pair of triangles either side of
+// `x, y` along its heading; a still one is the single triangle at that point,
+// counting `life` down.
 struct Triangle {
     float x = 0.0f, y = 0.0f;
     float vx = 0.0f, vy = 0.0f;
-    float heading = 0.0f; // radians, the way it points and travels
+    float heading = 0.0f; // radians: the way it points, and for a pair, travels
+    float scale = 1.0f;   // multiplier on `triangle.size`
+    float warn = 0.0f;    // seconds left as a harmless outline, still ones only
+    float life = 0.0f;    // seconds left once armed, still ones only
+    bool moving = false;
+    bool active = false;
+};
+
+struct Hexagon {
+    float x = 0.0f, y = 0.0f;
+    float spin = 0.0f; // radians, turning over while it waits to be collected
     bool active = false;
 };
 
@@ -139,6 +172,9 @@ struct World {
     // the configured size and closes in from there — circle by its center.
     float square_x = 0.0f, square_y = 0.0f;
     float square_w = 0.0f, square_h = 0.0f;
+    float square_vx = 0.0f, square_vy = 0.0f;
+    float square_alpha = 1.0f; // frame goes see-through when it isn't driven
+    float grow_to_w = 0.0f, grow_to_h = 0.0f; // size a hexagon promised, 0 when none
     float circle_x = 0.0f, circle_y = 0.0f;
     float circle_vx = 0.0f, circle_vy = 0.0f;
 
@@ -151,11 +187,15 @@ struct World {
 
     Diamond diamond{};
     float diamond_wait = 0.0f; // until the next one appears
+    Hexagon hex{};
+    float hex_wait = 0.0f;     // until the next one appears
     Star star{};
     float star_wait = 0.0f;    // until the next one appears
-    std::array<Triangle, kTriangleMax> triangles{};
+    std::array<Triangle, kHazardMax> triangles{};
     std::array<Shard, kTriShardCount> tri_shards{};
+    SDL_Color shard_tint{}; // whichever hazard the loose shards came from
     float triangle_wait = 0.0f;
+    float still_wait = 0.0f;
     float look = 0.0f;         // where the eye points, in radians
     float gaze = 1.0f;         // how far out the pupil sits, 0 = dead center
     int   eaten = 0;           // diamonds collected, the bottom row's tally
@@ -224,8 +264,11 @@ World make_world(const Config& cfg) {
 
     w.rng = SDL_GetTicks() * 2654435761u + 1u; // don't replay the same spawns
     w.diamond_wait = rand_range(w, kDiamondGapMin, kDiamondGapMax);
+    w.hex_wait     = rand_range(w, cfg.hexagon_gap_min, cfg.hexagon_gap_max);
     w.star_wait    = rand_range(w, cfg.star_gap_min, cfg.star_gap_max);
-    w.triangle_wait = rand_range(w, cfg.triangle_gap_min, cfg.triangle_gap_max);
+    w.triangle_wait = rand_range(w, cfg.moving_hazard_gap_min, cfg.moving_hazard_gap_max);
+    w.still_wait    = rand_range(w, cfg.still_hazard_gap_min, cfg.still_hazard_gap_max);
+    w.shard_tint    = cfg.moving_hazard_color;
     return w;
 }
 
@@ -322,8 +365,14 @@ void update_dots(World& w, const Config& cfg, float dt) {
 // The ball never leaves the square, so one that lands outside is collected by
 // steering the square onto it.
 void spawn_diamond(World& w, const Config& cfg) {
-    const float inset_x = kDiamondHalfW + 4.0f;
-    const float inset_y = kDiamondHalfH + 4.0f;
+    // Both margins are trimmed to what a small window can spare, so the band
+    // they leave never inverts.
+    const float room_x = static_cast<float>(cfg.window_w) * 0.5f - kDiamondHalfW - 4.0f;
+    const float room_y = static_cast<float>(cfg.window_h) * 0.5f - kDiamondHalfH - 4.0f;
+    const float inset_x = kDiamondHalfW + 4.0f +
+                          std::clamp(cfg.diamond_edge_margin_x, 0.0f, std::max(room_x, 0.0f));
+    const float inset_y = kDiamondHalfH + 4.0f +
+                          std::clamp(cfg.diamond_edge_margin_y, 0.0f, std::max(room_y, 0.0f));
     const float max_x = static_cast<float>(cfg.window_w) - inset_x;
     const float max_y = static_cast<float>(cfg.window_h) - inset_y;
     if (max_x <= inset_x || max_y <= inset_y) return; // window too small to hold one
@@ -363,6 +412,42 @@ void update_diamond(World& w, const Config& cfg, float dt) {
     w.diamond.active = false;
 }
 
+// A hazard measures itself against its own kind's configured size.
+float hazard_size(const Triangle& t, const Config& cfg) {
+    const float base = t.moving ? cfg.moving_hazard_size : cfg.still_hazard_size;
+    return base * t.scale;
+}
+
+SDL_Color hazard_color(const Triangle& t, const Config& cfg) {
+    return t.moving ? cfg.moving_hazard_color : cfg.still_hazard_color;
+}
+
+// Two things of these sizes, at these points: is there room between them? Every
+// spawn that has to stay off something else asks this.
+bool spots_are_clear(float x, float y, float size,
+                     float other_x, float other_y, float other_size) {
+    const float reach = size + other_size + kSpawnPad;
+    const float dx = x - other_x;
+    const float dy = y - other_y;
+    return dx * dx + dy * dy > reach * reach;
+}
+
+// Is this spot clear of every still hazard on the field? Stars and planted
+// triangles both ask, so the two never land on top of each other.
+bool clear_of_still_hazards(const World& w, const Config& cfg, float x, float y,
+                            float size) {
+    for (const Triangle& t : w.triangles) {
+        if (!t.active || t.moving) continue;
+        if (!spots_are_clear(x, y, size, t.x, t.y, hazard_size(t, cfg))) return false;
+    }
+    return true;
+}
+
+bool hex_clear_of(const Config& cfg, float x, float y,
+                  float other_x, float other_y, float other_size) {
+    return spots_are_clear(x, y, cfg.hexagon_size, other_x, other_y, other_size);
+}
+
 // Drops a star anywhere on screen. Unlike a diamond it is never collected: the
 // ball is pulled to it, so it only has to be reachable, not inside the square.
 bool spawn_star(World& w, const Config& cfg) {
@@ -379,11 +464,20 @@ bool spawn_star(World& w, const Config& cfg) {
     const float max_y = static_cast<float>(cfg.window_h) - min_y;
     if (max_x <= min_x || max_y <= min_y) return false;
 
-    w.star.x      = rand_range(w, min_x, max_x);
-    w.star.y      = rand_range(w, min_y, max_y);
-    w.star.spin   = 0.0f; // every star arrives upright
-    w.star.active = true;
-    return true;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        const float x = rand_range(w, min_x, max_x);
+        const float y = rand_range(w, min_y, max_y);
+        // The ball is sent straight to a star, so one planted on a hazard would
+        // be a trap with no way around it.
+        if (!clear_of_still_hazards(w, cfg, x, y, cfg.star_size)) continue;
+
+        w.star.x      = x;
+        w.star.y      = y;
+        w.star.spin   = 0.0f; // every star arrives upright
+        w.star.active = true;
+        return true;
+    }
+    return false;
 }
 
 // Speed lives in the velocity vector, so read it back rather than recomputing it
@@ -434,6 +528,102 @@ void launch_ball(World& w, const Config& cfg) {
     const float speed = ball_speed(w, cfg) * diagonal;
     w.circle_vx = (quadrant & 1u) ? -speed : speed;
     w.circle_vy = (quadrant & 2u) ? -speed : speed;
+}
+
+// A hexagon has to be driven to, and it has to be readable when you get there,
+// so it keeps away from the square, the ball, every other pickup and every
+// hazard on the field, and off the HUD rows top and bottom.
+bool hex_spot_is_clear(const World& w, const Config& cfg, float x, float y) {
+    const float margin = cfg.hexagon_size + 6.0f;
+    if (x > w.square_x - margin && x < w.square_x + w.square_w + margin &&
+        y > w.square_y - margin && y < w.square_y + w.square_h + margin) {
+        return false;
+    }
+    if (y < cfg.diamond_edge_margin_y ||
+        y > static_cast<float>(cfg.window_h) - cfg.diamond_edge_margin_y) {
+        return false;
+    }
+    if (!hex_clear_of(cfg, x, y, w.circle_x, w.circle_y, ball_radius(w, cfg))) {
+        return false;
+    }
+    if (w.diamond.active &&
+        !hex_clear_of(cfg, x, y, w.diamond.x, w.diamond.y, kDiamondHalfH)) {
+        return false;
+    }
+    if (w.star.active && !hex_clear_of(cfg, x, y, w.star.x, w.star.y, cfg.star_size)) {
+        return false;
+    }
+    for (const Triangle& t : w.triangles) {
+        if (!t.active) continue;
+        // A crossing is still off screen while it waits, so judge it by the
+        // lane it is about to run rather than where it happens to be parked.
+        const float size = hazard_size(t, cfg);
+        if (t.moving) {
+            const float center_x = static_cast<float>(cfg.window_w) * 0.5f;
+            const float center_y = static_cast<float>(cfg.window_h) * 0.5f;
+            const float along_x = std::cos(t.heading);
+            const float along_y = std::sin(t.heading);
+            const float off_x = x - center_x;
+            const float off_y = y - center_y;
+            const float across = std::fabs(off_x * along_y - off_y * along_x);
+            if (across < cfg.hexagon_size + size + kSpawnPad) return false;
+        } else if (!hex_clear_of(cfg, x, y, t.x, t.y, size)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Drops a hexagon somewhere clear of everything, so it has to be driven to
+// rather than collected the instant it appears.
+void spawn_hexagon(World& w, const Config& cfg) {
+    const float margin = cfg.hexagon_size + 6.0f;
+    const float max_x = static_cast<float>(cfg.window_w) - margin;
+    const float max_y = static_cast<float>(cfg.window_h) - margin;
+    if (max_x <= margin || max_y <= margin) return;
+
+    for (int attempt = 0; attempt < 24; ++attempt) {
+        const float x = rand_range(w, margin, max_x);
+        const float y = rand_range(w, margin, max_y);
+        if (!hex_spot_is_clear(w, cfg, x, y)) continue;
+        w.hex.x      = x;
+        w.hex.y      = y;
+        w.hex.spin   = 0.0f; // every one arrives the same way up
+        w.hex.active = true;
+        return;
+    }
+}
+
+// The square's pickup: touching one puts back half the difference between the
+// size it has shrunk to and the size it started at, around its own center, and
+// nudges it back inside the window if the growth pushed it out.
+void update_hexagon(World& w, const Config& cfg, float dt) {
+    if (!w.hex.active) {
+        if (w.eaten < cfg.hexagon_unlock) return; // earned, like the hazards
+        w.hex_wait -= dt;
+        if (w.hex_wait <= 0.0f) {
+            w.hex_wait = rand_range(w, cfg.hexagon_gap_min, cfg.hexagon_gap_max);
+            spawn_hexagon(w, cfg);
+        }
+        return;
+    }
+
+    w.hex.spin += cfg.hexagon_spin_speed * kTwoPi * dt;
+
+    // Nearest point on the square to the hexagon's center: the frame has caught
+    // it once that point is within the hexagon.
+    const float near_x = std::clamp(w.hex.x, w.square_x, w.square_x + w.square_w);
+    const float near_y = std::clamp(w.hex.y, w.square_y, w.square_y + w.square_h);
+    const float dx = w.hex.x - near_x;
+    const float dy = w.hex.y - near_y;
+    if (dx * dx + dy * dy > cfg.hexagon_size * cfg.hexagon_size) return;
+
+    // Set the target, don't jump to it: grow_square() walks the walls back out.
+    w.grow_to_w = w.square_w + (cfg.square_w - w.square_w) * kHexRecovery;
+    w.grow_to_h = w.square_h + (cfg.square_h - w.square_h) * kHexRecovery;
+
+    w.hex.active = false;
+    w.hex_wait   = rand_range(w, cfg.hexagon_gap_min, cfg.hexagon_gap_max);
 }
 
 // Throws a set of shards out on an even fan, each a little different so the
@@ -510,27 +700,103 @@ float update_look(World& w, const Config& cfg, float dt) {
     return std::fabs(delta) - std::min(std::fabs(delta), step);
 }
 
-// Sends a triangle in from off screen, aimed dead at the middle of the window,
-// so every one of them crosses the center on a different line.
-void spawn_triangle(World& w, const Config& cfg) {
-    Triangle* slot = nullptr;
+Triangle* free_hazard(World& w) {
     for (Triangle& t : w.triangles) {
-        if (!t.active) { slot = &t; break; }
+        if (!t.active) return &t;
     }
-    if (!slot) return; // screen is full; try again on the next timer
+    return nullptr; // field is full; the timer just skips a turn
+}
+
+// Where a hazard's triangles actually sit: a moving one is a pair straddling
+// its center along the heading, a still one is the single triangle on it. Both
+// drawing and collision go through this, so they can never disagree.
+int hazard_lobes(const Triangle& t, const Config& cfg, float* xs, float* ys) {
+    if (!t.moving) {
+        xs[0] = t.x;
+        ys[0] = t.y;
+        return 1;
+    }
+    const float dx = std::cos(t.heading) * hazard_size(t, cfg) * kPairOffset;
+    const float dy = std::sin(t.heading) * hazard_size(t, cfg) * kPairOffset;
+    xs[0] = t.x - dx;
+    ys[0] = t.y - dy;
+    xs[1] = t.x + dx;
+    ys[1] = t.y + dy;
+    return 2;
+}
+
+// Sends a pair in from off screen, aimed dead at the middle of the window, so
+// every one of them crosses the center on a different line.
+void spawn_triangle(World& w, const Config& cfg) {
+    Triangle* slot = free_hazard(w);
+    if (!slot) return;
 
     const float center_x = static_cast<float>(cfg.window_w) * 0.5f;
     const float center_y = static_cast<float>(cfg.window_h) * 0.5f;
-    const float reach =
-        std::sqrt(center_x * center_x + center_y * center_y) + cfg.triangle_size * 2.0f;
+    const float reach = std::sqrt(center_x * center_x + center_y * center_y) +
+                        cfg.moving_hazard_size * 3.0f;
     const float angle = rand_range(w, 0.0f, kTwoPi);
 
     slot->x  = center_x + std::cos(angle) * reach;
     slot->y  = center_y + std::sin(angle) * reach;
-    slot->vx = -std::cos(angle) * cfg.triangle_speed;
-    slot->vy = -std::sin(angle) * cfg.triangle_speed;
+    slot->vx = -std::cos(angle) * cfg.moving_hazard_speed;
+    slot->vy = -std::sin(angle) * cfg.moving_hazard_speed;
     slot->heading = angle + kPi; // it points the way it travels
-    slot->active  = true;
+    slot->scale  = 1.0f;
+    slot->warn   = cfg.moving_hazard_warn; // waits behind its own telegraph
+    slot->life   = 0.0f;
+    slot->moving = true;
+    slot->active = true;
+}
+
+// Plants a lone triangle somewhere outside the square, upright and at one of
+// three sizes. It won't land on the ball — that would be a hit with nothing to
+// react to — and it won't land inside the square, where the ball has nowhere to
+// dodge to. It arrives as a harmless outline and arms itself later.
+void spawn_still_triangle(World& w, const Config& cfg) {
+    Triangle* slot = free_hazard(w);
+    if (!slot) return;
+
+    const Uint32 pick = (next_rand(w) >> 16) % kStillSizeCount;
+    const float scale = 1.0f + kStillSizeStep * static_cast<float>(pick);
+    const float size  = cfg.still_hazard_size * scale;
+
+    const float margin = size * 2.0f;
+    const float max_x = static_cast<float>(cfg.window_w) - margin;
+    const float max_y = static_cast<float>(cfg.window_h) - margin;
+    if (max_x <= margin || max_y <= margin) return;
+
+    const float clear = ball_collider(w, cfg) + size * 3.0f;
+    for (int attempt = 0; attempt < 12; ++attempt) {
+        const float x = rand_range(w, margin, max_x);
+        const float y = rand_range(w, margin, max_y);
+        const float dx = x - w.circle_x;
+        const float dy = y - w.circle_y;
+        if (dx * dx + dy * dy < clear * clear) continue;
+
+        if (w.star.active &&
+            !spots_are_clear(x, y, size, w.star.x, w.star.y, cfg.star_size)) {
+            continue;
+        }
+
+        // Not in the square, nor close enough to overlap its walls.
+        if (x > w.square_x - size && x < w.square_x + w.square_w + size &&
+            y > w.square_y - size && y < w.square_y + w.square_h + size) {
+            continue;
+        }
+
+        slot->x  = x;
+        slot->y  = y;
+        slot->vx = 0.0f;
+        slot->vy = 0.0f;
+        slot->heading = -kPi * 0.5f; // upright, however big it is
+        slot->scale  = scale;
+        slot->warn   = cfg.still_hazard_arm;
+        slot->life   = cfg.still_hazard_life;
+        slot->moving = false;
+        slot->active = true;
+        return;
+    }
 }
 
 // Flies the triangles across, retires the ones that have left, and reports a
@@ -539,80 +805,184 @@ void spawn_triangle(World& w, const Config& cfg) {
 bool update_triangles(World& w, const Config& cfg, float dt) {
     update_shards(w.tri_shards, cfg, dt);
 
-    w.triangle_wait -= dt;
-    if (w.triangle_wait <= 0.0f) {
-        w.triangle_wait = rand_range(w, cfg.triangle_gap_min, cfg.triangle_gap_max);
-        spawn_triangle(w, cfg);
+    // Both hazards are earned: neither appears until the tally along the bottom
+    // has reached its own threshold, and each timer holds rather than running
+    // down behind the scenes, so the first one comes a full interval after the
+    // qualifying diamond rather than the instant it is eaten.
+    if (w.eaten >= cfg.moving_hazard_unlock) {
+        w.triangle_wait -= dt;
+        if (w.triangle_wait <= 0.0f) {
+            w.triangle_wait =
+                rand_range(w, cfg.moving_hazard_gap_min, cfg.moving_hazard_gap_max);
+            spawn_triangle(w, cfg);
+        }
+    }
+
+    if (w.eaten >= cfg.still_hazard_unlock) {
+        w.still_wait -= dt;
+        if (w.still_wait <= 0.0f) {
+            w.still_wait =
+                rand_range(w, cfg.still_hazard_gap_min, cfg.still_hazard_gap_max);
+            spawn_still_triangle(w, cfg);
+        }
     }
 
     const float center_x = static_cast<float>(cfg.window_w) * 0.5f;
     const float center_y = static_cast<float>(cfg.window_h) * 0.5f;
-    const float gone =
-        std::sqrt(center_x * center_x + center_y * center_y) + cfg.triangle_size * 3.0f;
-    const float reach = ball_collider(w, cfg) + cfg.triangle_size * kTriangleHit;
-
+    const float gone = std::sqrt(center_x * center_x + center_y * center_y) +
+                       cfg.moving_hazard_size * 4.0f;
     bool struck = false;
     for (Triangle& t : w.triangles) {
         if (!t.active) continue;
-        t.x += t.vx * dt;
-        t.y += t.vy * dt;
 
-        const float ox = t.x - center_x;
-        const float oy = t.y - center_y;
-        if (ox * ox + oy * oy > gone * gone) { // crossed and left the far side
-            t.active = false;
+        if (t.moving) {
+            if (t.warn > 0.0f) {
+                t.warn -= dt; // still just a strip on the field
+                continue;
+            }
+            t.x += t.vx * dt;
+            t.y += t.vy * dt;
+            const float ox = t.x - center_x;
+            const float oy = t.y - center_y;
+            if (ox * ox + oy * oy > gone * gone) { // crossed and left the far side
+                t.active = false;
+                continue;
+            }
+        } else if (t.warn > 0.0f) {
+            t.warn -= dt; // still an outline, still harmless
             continue;
+        } else {
+            t.life -= dt;
+            if (t.life <= 0.0f) {
+                t.active = false;
+                continue;
+            }
         }
 
         if (!w.ball_alive) continue;
-        const float dx = t.x - w.circle_x;
-        const float dy = t.y - w.circle_y;
-        if (dx * dx + dy * dy > reach * reach) continue;
 
-        fan_shards(w.tri_shards, t.x, t.y, cfg.triangle_size * 0.5f, kTriShardSpeed);
-        t.active = false;
-        struck = true;
+        // Bigger triangles reach further, so the test is per hazard.
+        const float reach = ball_collider(w, cfg) + hazard_size(t, cfg) * kTriangleHit;
+        float xs[2], ys[2];
+        const int lobes = hazard_lobes(t, cfg, xs, ys);
+        for (int i = 0; i < lobes; ++i) {
+            const float dx = xs[i] - w.circle_x;
+            const float dy = ys[i] - w.circle_y;
+            if (dx * dx + dy * dy > reach * reach) continue;
+
+            fan_shards(w.tri_shards, t.x, t.y, hazard_size(t, cfg) * 0.5f, kTriShardSpeed);
+            w.shard_tint = hazard_color(t, cfg);
+            t.active = false;
+            struck = true;
+            break;
+        }
     }
     return struck;
 }
 
-// Drives the square from the keyboard and reports whether it actually moved.
-// The damage rule keys off that, and the star chases steer the square too.
+// Drives the square from the keyboard and reports whether the player was
+// pushing it this tick — not whether it happens to be in motion. The damage
+// rule keys off that, so a wall still coasting after the key is let go is free,
+// the way an untouched wall always has been.
+//
+// The keys set a direction to accelerate along rather than a position; letting
+// go hands the square to friction, which at the configured rate scrubs off a
+// full turn of speed in a fraction of a second.
 bool move_square(World& w, const Config& cfg, const Uint8* keys, float dt) {
-    float move_x = 0.0f, move_y = 0.0f;
-    if (keys[SDL_SCANCODE_LEFT]  || keys[SDL_SCANCODE_A]) move_x -= 1.0f;
-    if (keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D]) move_x += 1.0f;
-    if (keys[SDL_SCANCODE_UP]    || keys[SDL_SCANCODE_W]) move_y -= 1.0f;
-    if (keys[SDL_SCANCODE_DOWN]  || keys[SDL_SCANCODE_S]) move_y += 1.0f;
+    float push_x = 0.0f, push_y = 0.0f;
+    if (keys[SDL_SCANCODE_LEFT]  || keys[SDL_SCANCODE_A]) push_x -= 1.0f;
+    if (keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D]) push_x += 1.0f;
+    if (keys[SDL_SCANCODE_UP]    || keys[SDL_SCANCODE_W]) push_y -= 1.0f;
+    if (keys[SDL_SCANCODE_DOWN]  || keys[SDL_SCANCODE_S]) push_y += 1.0f;
 
-    const bool moving = (move_x != 0.0f || move_y != 0.0f);
+    const bool pushing = (push_x != 0.0f || push_y != 0.0f);
 
-    if (move_x != 0.0f && move_y != 0.0f) { // no free speed on the diagonal
-        const float inv = 0.70710678f;
-        move_x *= inv;
-        move_y *= inv;
+    if (pushing) {
+        if (push_x != 0.0f && push_y != 0.0f) { // no free speed on the diagonal
+            const float inv = 0.70710678f;
+            push_x *= inv;
+            push_y *= inv;
+        }
+        w.square_vx += push_x * cfg.square_acceleration * dt;
+        w.square_vy += push_y * cfg.square_acceleration * dt;
+
+        // Cap the vector, not each axis, or a diagonal would outrun a straight
+        // line the way the old normalization already avoided.
+        const float speed =
+            std::sqrt(w.square_vx * w.square_vx + w.square_vy * w.square_vy);
+        if (speed > cfg.square_speed && speed > 0.0f) {
+            const float trim = cfg.square_speed / speed;
+            w.square_vx *= trim;
+            w.square_vy *= trim;
+        }
+    } else {
+        // Friction takes a fixed bite per second and never overshoots into
+        // reverse, so the square coasts to a stop rather than rebounding.
+        const float speed =
+            std::sqrt(w.square_vx * w.square_vx + w.square_vy * w.square_vy);
+        const float shed = cfg.square_friction * dt;
+        if (speed <= shed || speed <= 0.0f) {
+            w.square_vx = 0.0f;
+            w.square_vy = 0.0f;
+        } else {
+            const float trim = (speed - shed) / speed;
+            w.square_vx *= trim;
+            w.square_vy *= trim;
+        }
     }
 
-    w.square_x += move_x * cfg.square_speed * dt;
-    w.square_y += move_y * cfg.square_speed * dt;
-    w.square_x = std::clamp(w.square_x, 0.0f, static_cast<float>(cfg.window_w) - w.square_w);
-    w.square_y = std::clamp(w.square_y, 0.0f, static_cast<float>(cfg.window_h) - w.square_h);
-    return moving;
+    w.square_x += w.square_vx * dt;
+    w.square_y += w.square_vy * dt;
+
+    // The window edge is a dead stop, not a wall to slide along at speed.
+    const float max_x = static_cast<float>(cfg.window_w) - w.square_w;
+    const float max_y = static_cast<float>(cfg.window_h) - w.square_h;
+    if (w.square_x < 0.0f || w.square_x > max_x) {
+        w.square_x = std::clamp(w.square_x, 0.0f, max_x);
+        w.square_vx = 0.0f;
+    }
+    if (w.square_y < 0.0f || w.square_y > max_y) {
+        w.square_y = std::clamp(w.square_y, 0.0f, max_y);
+        w.square_vy = 0.0f;
+    }
+
+    return pushing;
 }
 
-// Closes the square in around its own center, so the walls come to the ball
-// evenly rather than the box crawling off in one direction. The floor keeps the
-// circle able to fit, whatever diamonds have done to it.
-void shrink_square(World& w, const Config& cfg, float dt) {
-    const float floor_size = std::max(cfg.square_min_size, ball_collider(w, cfg) * 2.0f);
-    const float step = cfg.square_shrink_rate * dt;
-
-    const float next_w = std::max(w.square_w - step, floor_size);
-    const float next_h = std::max(w.square_h - step, floor_size);
+// Resizes the square around its own center and keeps it in the window. Both the
+// shrink and a hexagon's recovery go through here, so the box never lurches off
+// in one direction as it changes size.
+void resize_square(World& w, const Config& cfg, float next_w, float next_h) {
     w.square_x += (w.square_w - next_w) * 0.5f;
     w.square_y += (w.square_h - next_h) * 0.5f;
     w.square_w = next_w;
     w.square_h = next_h;
+    w.square_x = std::clamp(w.square_x, 0.0f, static_cast<float>(cfg.window_w) - w.square_w);
+    w.square_y = std::clamp(w.square_y, 0.0f, static_cast<float>(cfg.window_h) - w.square_h);
+}
+
+// Walks the walls back out toward whatever a hexagon promised, and reports that
+// it is still doing so — the shrink holds off until it lands.
+bool grow_square(World& w, const Config& cfg, float dt) {
+    if (w.grow_to_w <= w.square_w && w.grow_to_h <= w.square_h) {
+        w.grow_to_w = 0.0f; // nothing pending
+        w.grow_to_h = 0.0f;
+        return false;
+    }
+
+    const float step = cfg.hexagon_grow_rate * dt;
+    resize_square(w, cfg, std::min(w.square_w + step, w.grow_to_w),
+                  std::min(w.square_h + step, w.grow_to_h));
+    return true;
+}
+
+// Closes the square in around its own center. The floor keeps the circle able
+// to fit, whatever diamonds have done to it.
+void shrink_square(World& w, const Config& cfg, float dt) {
+    const float floor_size = std::max(cfg.square_min_size, ball_collider(w, cfg) * 2.0f);
+    const float step = cfg.square_shrink_rate * dt;
+    resize_square(w, cfg, std::max(w.square_w - step, floor_size),
+                  std::max(w.square_h - step, floor_size));
 }
 
 // Spends the speed boost. The size half of a diamond never lapses, so this only
@@ -632,6 +1002,19 @@ void age_boost(World& w, float dt) {
 void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
     update_dots(w, cfg, dt);
     const float aim_error = update_look(w, cfg, dt);
+
+    // A frame that isn't going anywhere fades back, so the eye is drawn to the
+    // one that is. Only the phases that actually drive it count as moving —
+    // during a shake the velocity is merely stale. It stays solid through a
+    // collision, though: the wall that landed the hit holds its weight until
+    // the ball has finished reacting to it.
+    const bool drivable = w.phase == Phase::Play || w.phase == Phase::StarLook ||
+                          w.phase == Phase::StarSeek || w.phase == Phase::StarHold;
+    const bool colliding = w.phase == Phase::Shake || w.phase == Phase::Burst;
+    const bool driven = drivable && (w.square_vx != 0.0f || w.square_vy != 0.0f);
+    const float alpha_target = (colliding || driven) ? 1.0f : cfg.square_idle_alpha;
+    const float alpha_step = kSquareFadeRate * dt;
+    w.square_alpha += std::clamp(alpha_target - w.square_alpha, -alpha_step, alpha_step);
     if (w.grace > 0.0f) w.grace -= dt;
     w.timer += dt;
 
@@ -640,8 +1023,9 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         const bool square_moving = move_square(w, cfg, keys, dt);
 
         // Only open play closes the walls in: a diamond boost holds them, and
-        // so does every star phase, none of which come through here.
-        if (w.boost <= 0.0f) shrink_square(w, cfg, dt);
+        // so does every star phase, none of which come through here. A hexagon's
+        // recovery holds them too, until it has finished opening them out.
+        if (!grow_square(w, cfg, dt) && w.boost <= 0.0f) shrink_square(w, cfg, dt);
 
         // Let the speed boost lapse before the bounce, so a tick is never
         // integrated at one speed and reflected at another.
@@ -652,6 +1036,7 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
 
         const bool hit = confine_circle_to_square(w, cfg);
         update_diamond(w, cfg, dt);
+        update_hexagon(w, cfg, dt);
         const bool struck = update_triangles(w, cfg, dt);
 
         // Only a wall that was on the move costs a dot; an idle bounce is free.
@@ -662,13 +1047,16 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
             break;
         }
 
-        // A star takes the ball over the moment it appears.
-        w.star_wait -= dt;
-        if (w.star_wait <= 0.0f) {
-            w.star_wait = rand_range(w, cfg.star_gap_min, cfg.star_gap_max);
-            if (spawn_star(w, cfg)) {
-                w.phase = Phase::StarLook;
-                w.timer = 0.0f;
+        // A star takes the ball over the moment it appears — but like the
+        // hazards, it is earned first, and its timer holds until then.
+        if (w.eaten >= cfg.star_unlock_diamonds) {
+            w.star_wait -= dt;
+            if (w.star_wait <= 0.0f) {
+                w.star_wait = rand_range(w, cfg.star_gap_min, cfg.star_gap_max);
+                if (spawn_star(w, cfg)) {
+                    w.phase = Phase::StarLook;
+                    w.timer = 0.0f;
+                }
             }
         }
         break;
@@ -682,6 +1070,8 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         move_square(w, cfg, keys, dt);
         age_boost(w, dt);
         update_diamond(w, cfg, dt);
+        update_hexagon(w, cfg, dt);
+        grow_square(w, cfg, dt); // a recovery in progress keeps opening out
         const bool struck = update_triangles(w, cfg, dt);
 
         if ((struck || ball_inside_square(w, cfg) != was_inside) && w.grace <= 0.0f) {
@@ -709,6 +1099,8 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         move_square(w, cfg, keys, dt);
         age_boost(w, dt);
         update_diamond(w, cfg, dt);
+        update_hexagon(w, cfg, dt);
+        grow_square(w, cfg, dt);
         const bool struck = update_triangles(w, cfg, dt);
         const bool arrived = home_ball(w, cfg, w.star.x, w.star.y,
                                       cfg.circle_speed * cfg.star_seek_speed, dt);
@@ -737,6 +1129,8 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         move_square(w, cfg, keys, dt);
         age_boost(w, dt);
         update_diamond(w, cfg, dt);
+        update_hexagon(w, cfg, dt);
+        grow_square(w, cfg, dt);
         const bool struck = update_triangles(w, cfg, dt);
         w.star.spin += cfg.star_spin_speed * kTwoPi * dt;
 
@@ -921,16 +1315,70 @@ void fill_star(SDL_Renderer* renderer, float cx, float cy, float outer, float in
     fill_polygon(renderer, px, py, kPoints);
 }
 
-// One corner leads, so the triangle points the way it is travelling.
-void fill_triangle(SDL_Renderer* renderer, float cx, float cy, float size, float heading) {
-    constexpr int kPoints = 3;
+// The lane a crossing will run down: a long translucent band through the middle
+// of the window, laid along the hazard's heading.
+void fill_path_strip(SDL_Renderer* renderer, const Config& cfg, const Triangle& t,
+                     float size) {
+    const float center_x = static_cast<float>(cfg.window_w) * 0.5f;
+    const float center_y = static_cast<float>(cfg.window_h) * 0.5f;
+    const float half_len =
+        std::sqrt(center_x * center_x + center_y * center_y) + size * 4.0f;
+    const float half_w = size * kStripHalfWidth;
+
+    const float dir_x = std::cos(t.heading);
+    const float dir_y = std::sin(t.heading);
+    const float side_x = -dir_y * half_w; // perpendicular to the run
+    const float side_y = dir_x * half_w;
+
+    const float px[4] = {
+        center_x - dir_x * half_len + side_x, center_x + dir_x * half_len + side_x,
+        center_x + dir_x * half_len - side_x, center_x - dir_x * half_len - side_x,
+    };
+    const float py[4] = {
+        center_y - dir_y * half_len + side_y, center_y + dir_y * half_len + side_y,
+        center_y + dir_y * half_len - side_y, center_y - dir_y * half_len - side_y,
+    };
+    fill_polygon(renderer, px, py, 4);
+}
+
+void fill_hexagon(SDL_Renderer* renderer, float cx, float cy, float size, float spin) {
+    constexpr int kPoints = 6;
     float px[kPoints], py[kPoints];
     for (int i = 0; i < kPoints; ++i) {
-        const float angle = heading + kTwoPi * static_cast<float>(i) / 3.0f;
+        const float angle = -kPi * 0.5f + kPi * static_cast<float>(i) / 3.0f + spin;
         px[i] = cx + std::cos(angle) * size;
         py[i] = cy + std::sin(angle) * size;
     }
     fill_polygon(renderer, px, py, kPoints);
+}
+
+void triangle_points(float cx, float cy, float size, float heading,
+                     float* px, float* py) {
+    for (int i = 0; i < 3; ++i) {
+        const float angle = heading + kTwoPi * static_cast<float>(i) / 3.0f;
+        px[i] = cx + std::cos(angle) * size;
+        py[i] = cy + std::sin(angle) * size;
+    }
+}
+
+// One corner leads, so the triangle points the way it is travelling.
+void fill_triangle(SDL_Renderer* renderer, float cx, float cy, float size, float heading) {
+    float px[3], py[3];
+    triangle_points(cx, cy, size, heading, px, py);
+    fill_polygon(renderer, px, py, 3);
+}
+
+// The unarmed state: the same outline, hollow, so a hazard that cannot hurt you
+// yet never looks like one that can.
+void draw_triangle(SDL_Renderer* renderer, float cx, float cy, float size, float heading) {
+    float px[3], py[3];
+    triangle_points(cx, cy, size, heading, px, py);
+    for (int i = 0; i < 3; ++i) {
+        const int j = (i + 1) % 3;
+        SDL_RenderDrawLine(renderer,
+                           static_cast<int>(std::lround(px[i])), static_cast<int>(std::lround(py[i])),
+                           static_cast<int>(std::lround(px[j])), static_cast<int>(std::lround(py[j])));
+    }
 }
 
 // How much black covers the frame: opaque through the hold, ramped either side.
@@ -950,34 +1398,30 @@ void render(SDL_Renderer* renderer, const World& w, const Config& cfg) {
     set_draw_color(renderer, cfg.background_color);
     SDL_RenderClear(renderer);
 
-    // Same pink as the ball, so one config key still drives every circle. Drawn
-    // as backdrop, so the square slides over the dots instead of under.
-    set_draw_color(renderer, cfg.circle_color);
-    for (const Dot& d : w.dots) {
-        if (!d.gone) fill_circle(renderer, d.x, d.y, kDotRadius);
-    }
-
-    // The tally, centered on the window so it opens outward as it fills. Drawn
-    // as backdrop like the dots, so the square passes over it.
-    const int fits = std::max(cfg.window_w / static_cast<int>(kScoreSpacing) - 1, 1);
-    const int shown = std::min(w.eaten, fits);
-    const float row_x = static_cast<float>(cfg.window_w) * 0.5f -
-                        kScoreSpacing * static_cast<float>(shown - 1) * 0.5f;
-    const float row_y = static_cast<float>(cfg.window_h) - kScoreBottom;
-    set_draw_color(renderer, kDiamondColor);
-    for (int i = 0; i < shown; ++i) {
-        fill_diamond(renderer, row_x + kScoreSpacing * static_cast<float>(i), row_y,
-                     kDiamondHalfW * kScoreScale, kDiamondHalfH * kScoreScale);
-    }
-
     const SDL_Rect square{
         static_cast<int>(std::lround(w.square_x)),
         static_cast<int>(std::lround(w.square_y)),
         static_cast<int>(std::lround(w.square_w)),
         static_cast<int>(std::lround(w.square_h)),
     };
-    set_draw_color(renderer, cfg.square_color);
-    SDL_RenderFillRect(renderer, &square);
+    // Outline only, drawn as nested rects one pixel apart — the square is a
+    // frame now, so a diamond under it shows through.
+    SDL_Color frame = cfg.square_color;
+    frame.a = static_cast<Uint8>(std::lround(static_cast<float>(frame.a) * w.square_alpha));
+    set_draw_color(renderer, frame);
+    const int thickness = static_cast<int>(std::lround(cfg.square_outline));
+    for (int i = 0; i < thickness; ++i) {
+        const SDL_Rect edge{square.x + i, square.y + i,
+                            square.w - 2 * i, square.h - 2 * i};
+        if (edge.w <= 0 || edge.h <= 0) break;
+        SDL_RenderDrawRect(renderer, &edge);
+    }
+
+    // The square's pickup sits with the ball's: over the frame, under the ball.
+    if (w.hex.active) {
+        set_draw_color(renderer, cfg.hexagon_color);
+        fill_hexagon(renderer, w.hex.x, w.hex.y, cfg.hexagon_size, w.hex.spin);
+    }
 
     // Between the two: on top of the square, under the ball that eats it.
     if (w.diamond.active) {
@@ -1005,10 +1449,41 @@ void render(SDL_Renderer* renderer, const World& w, const Config& cfg) {
     }
 
     // Hazards ride over the ball, so one crossing it is never hidden behind it.
-    set_draw_color(renderer, cfg.triangle_color);
     for (const Triangle& t : w.triangles) {
-        if (t.active) fill_triangle(renderer, t.x, t.y, cfg.triangle_size, t.heading);
+        if (!t.active) continue;
+        set_draw_color(renderer, hazard_color(t, cfg));
+
+        const float size = hazard_size(t, cfg);
+        float xs[2], ys[2];
+        const int lobes = hazard_lobes(t, cfg, xs, ys);
+
+        if (t.warn > 0.0f) {
+            if (t.moving) {
+                // Off screen still: all there is to see is the lane it will take.
+                const SDL_Color lane = hazard_color(t, cfg);
+                SDL_SetRenderDrawColor(renderer, lane.r, lane.g, lane.b, kStripAlpha);
+                fill_path_strip(renderer, cfg, t, size);
+            } else {
+                // Armed hazards are solid; this one is not yet.
+                for (int i = 0; i < lobes; ++i) {
+                    draw_triangle(renderer, xs[i], ys[i], size, t.heading);
+                }
+            }
+            continue;
+        }
+
+        // Armed and buzzing on the spot, which is the tell.
+        float shake_x = 0.0f, shake_y = 0.0f;
+        if (!t.moving) {
+            shake_x = size * kStillBuzz * std::sin(t.life * kStillBuzzRate);
+            shake_y = size * kStillBuzz * std::sin(t.life * kStillBuzzRate * 1.7f) * 0.6f;
+        }
+        for (int i = 0; i < lobes; ++i) {
+            fill_triangle(renderer, xs[i] + shake_x, ys[i] + shake_y, size, t.heading);
+        }
     }
+    // A burst replaces the whole array, so one tint covers whatever is loose.
+    set_draw_color(renderer, w.shard_tint);
     for (const Shard& s : w.tri_shards) {
         if (s.alive) fill_circle(renderer, s.x, s.y, s.radius);
     }
@@ -1018,6 +1493,26 @@ void render(SDL_Renderer* renderer, const World& w, const Config& cfg) {
         set_draw_color(renderer, cfg.star_color);
         fill_star(renderer, w.star.x, w.star.y, cfg.star_size,
                   cfg.star_size * kStarInnerRatio, w.star.spin);
+    }
+
+    // HUD: the hits left along the top and the diamonds eaten along the bottom.
+    // Drawn last of the field so nothing — square, ball, hazard or star — can
+    // cover them; only the fade goes over.
+    set_draw_color(renderer, cfg.circle_color); // the dots match the ball
+    for (const Dot& d : w.dots) {
+        if (!d.gone) fill_circle(renderer, d.x, d.y, kDotRadius);
+    }
+
+    // The tally is centered on the window, so it opens outward as it fills.
+    const int fits = std::max(cfg.window_w / static_cast<int>(kScoreSpacing) - 1, 1);
+    const int shown = std::min(w.eaten, fits);
+    const float row_x = static_cast<float>(cfg.window_w) * 0.5f -
+                        kScoreSpacing * static_cast<float>(shown - 1) * 0.5f;
+    const float row_y = static_cast<float>(cfg.window_h) - kScoreBottom;
+    set_draw_color(renderer, kDiamondColor);
+    for (int i = 0; i < shown; ++i) {
+        fill_diamond(renderer, row_x + kScoreSpacing * static_cast<float>(i), row_y,
+                     kDiamondHalfW * kScoreScale, kDiamondHalfH * kScoreScale);
     }
 
     if (const Uint8 fade = fade_alpha(w); fade > 0) {

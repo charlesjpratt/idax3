@@ -19,8 +19,16 @@ struct Config {
 
     float     square_w     = 260.0f;
     float     square_h     = 260.0f;
-    float     square_speed = 260.0f;   // pixels per second
-    SDL_Color square_color{0x3A, 0x3A, 0x3A, 0xFF};
+    // The square is driven, not teleported: `acceleration` builds speed up to
+    // `speed`, and `friction` takes it away again once the keys are let go.
+    // Friction well above acceleration is what makes it feel like it stops dead.
+    float     square_speed        = 260.0f;  // top speed, pixels per second
+    float     square_acceleration = 1400.0f; // pixels per second squared
+    float     square_friction     = 4200.0f; // pixels per second squared
+    SDL_Color square_color{0x7F, 0xFF, 0xD4, 0xFF};
+    float     square_outline = 3.0f;   // border thickness; the square is hollow
+    // How solid the frame is when it is sitting still, 1 being fully opaque.
+    float     square_idle_alpha = 0.5f;
 
     // The square closes in as the game runs: `shrink_rate` pixels off its width
     // and height every second of open play, down to `min_size`. It holds while a
@@ -65,14 +73,52 @@ struct Config {
     float star_seek_speed = 0.9f;
     float star_hold       = 3.0f;   // seconds the ball is held at the star
     float star_spin_speed = 1.0f;   // revolutions per second during that hold
+    // Stars hold off until this many diamonds have been eaten, the same way the
+    // hazards do. 0 means they are out from the first tick.
+    int   star_unlock_diamonds = 3;
 
-    // Red triangles: they cross the window through its center, from a random
-    // direction, and cost the circle a hit on contact.
-    float     triangle_size    = 16.0f; // circumradius, in pixels
-    SDL_Color triangle_color{0xE2, 0x3A, 0x2E, 0xFF};
-    float     triangle_speed   = 220.0f; // pixels per second
-    float     triangle_gap_min = 7.0f;   // seconds between one and the next
-    float     triangle_gap_max = 15.0f;
+    // Green diamonds keep this much clear of the window edge, on top of their
+    // own size: the HUD rows live top and bottom, and a pickup pinned to a side
+    // is a chore to reach. Trimmed at spawn to what a small window can spare.
+    float diamond_edge_margin_x = 60.0f;
+    float diamond_edge_margin_y = 42.0f;
+
+    // The hexagon: the square's own pickup, and the only answer to the shrink.
+    // Driving the square onto one wins back half the ground it has lost.
+    float     hexagon_size    = 14.0f; // circumradius, in pixels
+    SDL_Color hexagon_color{0x7F, 0xFF, 0xD4, 0xFF};
+    float     hexagon_spin_speed = 0.12f; // revolutions per second, while it waits
+    float     hexagon_grow_rate = 120.0f; // pixels per second the square opens back up
+    float     hexagon_gap_min = 8.0f;  // seconds between one being taken and the next
+    float     hexagon_gap_max = 16.0f;
+    int       hexagon_unlock  = 7;     // diamonds eaten before any appear
+
+    // Two red hazards, tuned apart but costing the circle the same hit. Each
+    // holds off until `unlock_diamonds` have been eaten, so the opening minutes
+    // can be just the circle, the square and the pickups; 0 means it is out
+    // from the first tick.
+
+    // A pair of triangles, drawn like a fast-forward button, crossing the
+    // window through its center from a random direction.
+    float     moving_hazard_size    = 16.0f;  // circumradius, in pixels
+    SDL_Color moving_hazard_color{0xE2, 0x3A, 0x2E, 0xFF};
+    float     moving_hazard_speed   = 220.0f; // pixels per second
+    // A translucent strip marks the line it will take, this many seconds before
+    // it sets off down it.
+    float     moving_hazard_warn    = 2.0f;
+    float     moving_hazard_gap_min = 7.0f;   // seconds between crossings
+    float     moving_hazard_gap_max = 15.0f;
+    int       moving_hazard_unlock  = 5;
+
+    // One upright triangle planted on the field, gone again after `life`. It
+    // spawns at its own size, half again, or double, evenly drawn.
+    float     still_hazard_size    = 16.0f;
+    SDL_Color still_hazard_color{0xE2, 0x3A, 0x2E, 0xFF};
+    float     still_hazard_gap_min = 5.0f;
+    float     still_hazard_gap_max = 11.0f;
+    float     still_hazard_arm     = 2.0f; // harmless outline before it arms
+    float     still_hazard_life    = 4.0f; // dangerous seconds after that
+    int       still_hazard_unlock  = 0;
 };
 
 namespace config_detail {
@@ -170,7 +216,10 @@ inline Config load_config(std::string* loaded_from = nullptr,
         const nlohmann::json square     = sub_object(root, "square");
         const nlohmann::json circle     = sub_object(root, "circle");
         const nlohmann::json star       = sub_object(root, "star");
-        const nlohmann::json triangle   = sub_object(root, "triangle");
+        const nlohmann::json diamond    = sub_object(root, "diamond");
+        const nlohmann::json hexagon    = sub_object(root, "hexagon");
+        const nlohmann::json moving_hazard = sub_object(root, "moving_hazard");
+        const nlohmann::json still_hazard  = sub_object(root, "still_hazard");
 
         cfg.window_w = window.value("width",  cfg.window_w);
         cfg.window_h = window.value("height", cfg.window_h);
@@ -179,8 +228,12 @@ inline Config load_config(std::string* loaded_from = nullptr,
 
         cfg.square_w     = square.value("width",  cfg.square_w);
         cfg.square_h     = square.value("height", cfg.square_h);
-        cfg.square_speed = square.value("speed",  cfg.square_speed);
+        cfg.square_speed        = square.value("speed",        cfg.square_speed);
+        cfg.square_acceleration = square.value("acceleration", cfg.square_acceleration);
+        cfg.square_friction     = square.value("friction",     cfg.square_friction);
         cfg.square_color = color_field(square, cfg.square_color);
+        cfg.square_outline     = square.value("outline",     cfg.square_outline);
+        cfg.square_idle_alpha  = square.value("idle_alpha",  cfg.square_idle_alpha);
         cfg.square_shrink_rate = square.value("shrink_rate", cfg.square_shrink_rate);
         cfg.square_min_size    = square.value("min_size",    cfg.square_min_size);
 
@@ -203,12 +256,39 @@ inline Config load_config(std::string* loaded_from = nullptr,
         cfg.star_seek_speed = star.value("seek_speed", cfg.star_seek_speed);
         cfg.star_hold       = star.value("hold",       cfg.star_hold);
         cfg.star_spin_speed = star.value("spin_speed", cfg.star_spin_speed);
+        cfg.star_unlock_diamonds =
+            star.value("unlock_diamonds", cfg.star_unlock_diamonds);
 
-        cfg.triangle_size    = triangle.value("size",    cfg.triangle_size);
-        cfg.triangle_color   = color_field(triangle, cfg.triangle_color);
-        cfg.triangle_speed   = triangle.value("speed",   cfg.triangle_speed);
-        cfg.triangle_gap_min = triangle.value("gap_min", cfg.triangle_gap_min);
-        cfg.triangle_gap_max = triangle.value("gap_max", cfg.triangle_gap_max);
+        cfg.diamond_edge_margin_x =
+            diamond.value("edge_margin_x", cfg.diamond_edge_margin_x);
+        cfg.diamond_edge_margin_y =
+            diamond.value("edge_margin_y", cfg.diamond_edge_margin_y);
+
+        cfg.hexagon_size    = hexagon.value("size",    cfg.hexagon_size);
+        cfg.hexagon_color   = color_field(hexagon, cfg.hexagon_color);
+        cfg.hexagon_spin_speed = hexagon.value("spin_speed", cfg.hexagon_spin_speed);
+        cfg.hexagon_grow_rate = hexagon.value("grow_rate", cfg.hexagon_grow_rate);
+        cfg.hexagon_gap_min = hexagon.value("gap_min", cfg.hexagon_gap_min);
+        cfg.hexagon_gap_max = hexagon.value("gap_max", cfg.hexagon_gap_max);
+        cfg.hexagon_unlock  = hexagon.value("unlock_diamonds", cfg.hexagon_unlock);
+
+        cfg.moving_hazard_size    = moving_hazard.value("size",    cfg.moving_hazard_size);
+        cfg.moving_hazard_color   = color_field(moving_hazard, cfg.moving_hazard_color);
+        cfg.moving_hazard_speed   = moving_hazard.value("speed",   cfg.moving_hazard_speed);
+        cfg.moving_hazard_warn    = moving_hazard.value("warn",    cfg.moving_hazard_warn);
+        cfg.moving_hazard_gap_min = moving_hazard.value("gap_min", cfg.moving_hazard_gap_min);
+        cfg.moving_hazard_gap_max = moving_hazard.value("gap_max", cfg.moving_hazard_gap_max);
+        cfg.moving_hazard_unlock  =
+            moving_hazard.value("unlock_diamonds", cfg.moving_hazard_unlock);
+
+        cfg.still_hazard_size    = still_hazard.value("size",    cfg.still_hazard_size);
+        cfg.still_hazard_color   = color_field(still_hazard, cfg.still_hazard_color);
+        cfg.still_hazard_gap_min = still_hazard.value("gap_min", cfg.still_hazard_gap_min);
+        cfg.still_hazard_gap_max = still_hazard.value("gap_max", cfg.still_hazard_gap_max);
+        cfg.still_hazard_arm     = still_hazard.value("arm",     cfg.still_hazard_arm);
+        cfg.still_hazard_life    = still_hazard.value("life",    cfg.still_hazard_life);
+        cfg.still_hazard_unlock  =
+            still_hazard.value("unlock_diamonds", cfg.still_hazard_unlock);
 
         if (loaded_from) *loaded_from = path;
         break;
@@ -221,6 +301,12 @@ inline Config load_config(std::string* loaded_from = nullptr,
     cfg.square_w        = std::clamp(cfg.square_w, cfg.circle_diameter, static_cast<float>(cfg.window_w));
     cfg.square_h        = std::clamp(cfg.square_h, cfg.circle_diameter, static_cast<float>(cfg.window_h));
     cfg.square_speed    = std::max(cfg.square_speed, 0.0f);
+    cfg.square_acceleration = std::max(cfg.square_acceleration, 0.0f);
+    cfg.square_friction     = std::max(cfg.square_friction, 0.0f);
+    // A border thicker than half the square would close it over entirely.
+    cfg.square_outline = std::clamp(cfg.square_outline, 1.0f,
+                                    std::min(cfg.square_w, cfg.square_h) * 0.5f);
+    cfg.square_idle_alpha  = std::clamp(cfg.square_idle_alpha, 0.0f, 1.0f);
     cfg.square_shrink_rate = std::max(cfg.square_shrink_rate, 0.0f);
     // The floor still has to hold the circle, and can't be bigger than the
     // square it is a floor for.
@@ -241,11 +327,34 @@ inline Config load_config(std::string* loaded_from = nullptr,
     // At zero the ball would never cover the ground to the star, so keep a floor.
     cfg.star_seek_speed = std::clamp(cfg.star_seek_speed, 0.05f, 4.0f);
     cfg.star_hold       = std::max(cfg.star_hold, 0.0f);
-    cfg.triangle_size    = std::max(cfg.triangle_size, 2.0f);
-    // At a standstill a triangle would never cross, and never make room for the
-    // next one, so keep it moving.
-    cfg.triangle_speed   = std::max(cfg.triangle_speed, 10.0f);
-    cfg.triangle_gap_min = std::max(cfg.triangle_gap_min, 0.0f);
-    cfg.triangle_gap_max = std::max(cfg.triangle_gap_max, cfg.triangle_gap_min);
+    cfg.star_unlock_diamonds = std::max(cfg.star_unlock_diamonds, 0);
+    cfg.diamond_edge_margin_x = std::max(cfg.diamond_edge_margin_x, 0.0f);
+    cfg.diamond_edge_margin_y = std::max(cfg.diamond_edge_margin_y, 0.0f);
+
+    cfg.hexagon_size    = std::max(cfg.hexagon_size, 2.0f);
+    // At zero the square would never actually reach the size it was given.
+    cfg.hexagon_grow_rate = std::max(cfg.hexagon_grow_rate, 1.0f);
+    cfg.hexagon_gap_min = std::max(cfg.hexagon_gap_min, 0.0f);
+    cfg.hexagon_gap_max = std::max(cfg.hexagon_gap_max, cfg.hexagon_gap_min);
+    cfg.hexagon_unlock  = std::max(cfg.hexagon_unlock, 0);
+
+    cfg.moving_hazard_size = std::max(cfg.moving_hazard_size, 2.0f);
+    // At a standstill one would never cross, and never free its slot for the
+    // next, so keep it moving.
+    cfg.moving_hazard_speed   = std::max(cfg.moving_hazard_speed, 10.0f);
+    cfg.moving_hazard_warn    = std::max(cfg.moving_hazard_warn, 0.0f);
+    cfg.moving_hazard_gap_min = std::max(cfg.moving_hazard_gap_min, 0.0f);
+    cfg.moving_hazard_gap_max =
+        std::max(cfg.moving_hazard_gap_max, cfg.moving_hazard_gap_min);
+    cfg.moving_hazard_unlock  = std::max(cfg.moving_hazard_unlock, 0);
+
+    cfg.still_hazard_size    = std::max(cfg.still_hazard_size, 2.0f);
+    cfg.still_hazard_gap_min = std::max(cfg.still_hazard_gap_min, 0.0f);
+    cfg.still_hazard_gap_max =
+        std::max(cfg.still_hazard_gap_max, cfg.still_hazard_gap_min);
+    cfg.still_hazard_arm    = std::max(cfg.still_hazard_arm, 0.0f);
+    // Long enough to be seen and steered around.
+    cfg.still_hazard_life   = std::max(cfg.still_hazard_life, 0.5f);
+    cfg.still_hazard_unlock = std::max(cfg.still_hazard_unlock, 0);
     return cfg;
 }

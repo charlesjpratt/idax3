@@ -49,7 +49,7 @@ instead of stopping short of it. Anything drawn — the ball, its shards, the ey
 — uses the full radius.
 
 `step()` is a switch on `World::phase`. `Play` is the ordinary one: it moves the
-square (diagonals normalized, clamped to the window),
+square through `move_square()`,
 integrates the circle, then calls `confine_circle_to_square()`. That last pass
 is what makes both interactions work with one piece of code: it clamps the
 circle to the square's inner bounds and flips the velocity component *away* from
@@ -57,15 +57,31 @@ whichever wall was crossed, so a circle hitting a wall bounces and a wall driven
 into the circle knocks it away. It also *reports* the touch, which is what the
 damage rule keys off.
 
-**The hit sequence.** A touch only costs something when the square was moving
-that tick (`square_moving`, taken from the raw input before the diagonal
-normalization) and `World::grace` has expired — an idle bounce is free, and the
+**Driving the square.** The keys set a direction to accelerate along, not a
+position: `square.acceleration` builds `World::square_vx`/`vy` up to
+`square.speed` — capped on the *vector*, so a diagonal doesn't outrun a straight
+line — and `square.friction` scrubs it off once the keys are let go, never
+overshooting into reverse. Friction well above acceleration is what makes it
+read as stopping dead while still having weight. The window edge zeroes the
+velocity on that axis rather than letting the box scrape along at speed.
+
+A frame that isn't going anywhere fades to `square.idle_alpha` and firms up
+again as it moves, eased through `World::square_alpha` so it doesn't flicker on
+every tap of a key. Only the phases that actually drive the square count as
+moving — during a fade the velocity is merely stale, not real — with one
+exception: `Shake` and `Burst` hold it solid, so the wall that landed a hit
+keeps its weight until the ball has finished reacting to it.
+
+**The hit sequence.** A touch only costs something when the player was pushing
+the square that tick (`move_square()` reports the keys, not its velocity, so a
+wall still coasting after the key is let go is free) and `World::grace` has
+expired — an idle bounce is free, and the
 `kHitGrace` window after a hit keeps a held key from eating every dot at once.
 A hit runs `Play → Shake → Play`: the whole world freezes for `kShakeTime` while
 `render()` offsets the ball by a decaying sine rattle, then `drop_next_dot()`
 knocks the rightmost dot in the top row loose. `update_dots()` runs in *every*
 phase, so that dot keeps arcing off the bottom of the screen while play resumes
-around it.
+around it — over the top of the field, since the dots are HUD.
 
 When `drop_next_dot()` takes the last one, the sequence continues
 `Shake → Burst → FadeOut → Black → FadeIn → Play` instead: `burst_ball()` clears
@@ -78,9 +94,10 @@ already back in its starting state. Phase lengths are the `k*Time` constants at
 the top of the file.
 
 **The shrinking square.** `shrink_square()` takes `square.shrink_rate` pixels
-off `World::square_w`/`square_h` per second and moves the corner by half of
-that, so the walls close in evenly around the square's own center instead of the
-box crawling one way. It is called from `Phase::Play` only, and only while
+off `World::square_w`/`square_h` per second, through `resize_square()` — the one
+place the box changes size, which moves the corner by half the difference so the
+walls close in evenly around its own center instead of the box crawling one way.
+A hexagon's recovery goes through the same helper. It is called from `Phase::Play` only, and only while
 `boost` is spent — which is the whole pause rule: a diamond's speed boost holds
 the walls, and so does every star phase, since none of them run through `Play`.
 The floor is `square.min_size` or the ball's current diameter, whichever is
@@ -91,7 +108,9 @@ that a closing wall touching the ball costs nothing — the damage rule keys off
 
 **The pickup.** `update_diamond()` runs only in `Play` and keeps at most one
 diamond on the field: it counts `diamond_wait` down, calls `spawn_diamond()` to
-place one at a random point anywhere in the window — inside the square or out —
+place one at a random point anywhere in the window — inside the square or out,
+but `diamond.edge_margin_x`/`_y` clear of the sides and of the HUD rows top and
+bottom, each margin trimmed at spawn to what a small window can spare —
 and grants the boost when the ball comes within `ball_radius() + kDiamondReach`.
 Nothing else clears one: a diamond has no lifetime, so the next `diamond_wait`
 only starts running once the ball has eaten the current one. Since the ball
@@ -102,8 +121,7 @@ gaps come from a small LCG on `World::rng`, seeded from `SDL_GetTicks()` in
 
 Each pickup also bumps `World::eaten`, which `render()` lays out along the
 bottom as a row of small diamonds, centered on the window so it opens outward
-from the middle as it fills. The row is drawn as backdrop like the top dots, so
-the square passes over it, and it is capped at what the window's width can hold
+from the middle as it fills. The row is HUD, drawn over everything on the field, and it is capped at what the window's width can hold
 — the count itself keeps going. A reset clears it along with the rest of the
 world.
 
@@ -149,27 +167,77 @@ round in here.
 
 **The triangles.** `update_triangles()` runs wherever the ball is live — `Play`
 and all three star phases — so hazards keep coming during a chase but freeze
-with everything else during a shake or a burst. `spawn_triangle()` picks a
-random angle, drops one off screen on that bearing and aims it at the middle of
-the window, so each crosses the center on its own line and points where it goes
-(`heading` feeds `fill_triangle()`). They retire once past the far side, and at
-most `kTriangleMax` are out at a time — the timer skips a beat rather than
-queueing when the screen is full. A touch (ball collider plus `kTriangleHit` of
-the triangle's size) bursts the triangle through the same `fan_shards()` the
-ball uses and sends the ball into `Phase::Shake`, the identical sequence a
-moving wall triggers: rattle, drop a dot, resume — or the death sequence if that
-was the last dot. Size, color, speed and rate are the `triangle` section of
-config.json.
+with everything else during a shake or a burst. Two kinds share one `Triangle`
+struct and one `kHazardMax` pool, told apart by `moving`, and each has its own
+spawn timer:
+
+- **Moving** (`spawn_triangle()`): a pair drawn like a fast-forward button. A
+  random bearing puts it off screen aimed at the middle of the window, so each
+  crosses the center on its own line, pointing where it goes. It waits off
+  screen for `moving_hazard.warn` first, with `fill_path_strip()` drawing the
+  translucent lane it is about to run down — the same `warn` field the still
+  ones use to stay harmless — then sets off. Retires past the far side. Tuned by
+  the `moving_hazard` section.
+- **Still** (`spawn_still_triangle()`): one upright triangle planted on the
+  field, which arrives *unarmed* — drawn hollow by `draw_triangle()` and skipped
+  by the collision pass entirely — for `still_hazard.arm` seconds, then fills
+  in, buzzes on the spot (`kStillBuzz`, a render-only offset) and is dangerous
+  for `still_hazard.life` before it goes. Solid-and-buzzing versus hollow-and-
+  still is the whole tell, so the two states must never look alike. It spawns
+  outside the square as well as clear of the ball: inside the frame the ball
+  would have nowhere to dodge to. It comes in one of three sizes, drawn evenly — `triangle.size`, half again, or double — carried on the
+  hazard's own `scale`, which `hazard_size()` turns into pixels for drawing, for
+  the spawn clearance and for the hit radius, so a bigger one really is harder
+  to dodge. It retries a few placements to avoid landing on the ball, which
+  would be an unreactable hit, and clear of a star that is already out, the
+  same rule from the other side. Tuned by the `still_hazard` section.
+
+Both gates read `World::eaten`, the same tally the bottom row draws, and both
+timers *hold* rather than draining while locked — so the first hazard of a kind
+comes a full interval after the qualifying diamond, not the instant it is eaten.
+A reset zeroes the tally, so each life earns its hazards again.
+
+`hazard_lobes()` is what keeps the two honest: it returns the one or two points a
+hazard's triangles actually occupy, and *both* drawing and collision go through
+it, so the shape you see is the shape that hits you. A touch (ball collider plus
+`kTriangleHit` of the size, tested per lobe) bursts the hazard through the same
+`fan_shards()` the ball uses and sends the ball into `Phase::Shake` — the
+identical sequence a moving wall triggers: rattle, drop a dot, resume, or the
+death sequence if that was the last dot. The two kinds have separate config sections —
+`moving_hazard` and `still_hazard` — each with its own size, color, rate and
+unlock, so they can be tuned against each other; `hazard_size()` and
+`hazard_color()` pick the right one off the hazard's `moving` flag. The loose
+shards carry `World::shard_tint`, set at the burst, since a burst replaces the
+whole array anyway.
+
+**The hexagon.** The square's own pickup, and the only thing that undoes the
+shrink. `update_hexagon()` keeps at most one out, gated on `hexagon.unlock`
+diamonds and spawned by `spawn_hexagon()`, which retries placements until
+`hex_spot_is_clear()` accepts one: clear of the square (so it has to be driven
+to rather than collected where it stands), of the ball, of any diamond or star
+on the field, of every hazard — a waiting crossing judged by the *lane* it is
+about to run, since it is still parked off screen — and off the HUD rows. Collection is a rect-to-circle
+test — nearest point on the square to the hexagon's center, against
+`hexagon.size` — because it is the *frame* that collects this one, not the ball.
+Taking it doesn't resize the square, it sets a *target*: `kHexRecovery` of the
+way from the current size back to `square.width`/`height`. `grow_square()` then
+walks the walls out to it at `hexagon.grow_rate`, and while it is doing so the
+shrink holds off, so the two never fight over the same pixels. The target can
+approach the starting size but never pass it.
 
 **The star.** Rarer than a diamond and not a pickup: it takes the ball off the
 player entirely. Everything about it is config — `star.size`, `star.color`,
 `star.gap_min`/`gap_max`, `star.edge_margin`, `star.pause`, `star.seek_speed`,
-`star.hold` and `star.spin_speed` — so
+`star.hold`, `star.spin_speed` and `star.unlock_diamonds` — so
 the whole effect is tunable with R; only the point geometry
-(`kStarInnerRatio`), the turn bounds and `kStarTimeout` stay in the code. `Play` counts `star_wait` down, and when `spawn_star()` places
-one on screen — anywhere `star.edge_margin` clear of the window edge, and that
-margin is trimmed at spawn to what the window can spare rather than starving the
-band it picks from — the phase switches to `StarLook`: the ball stops dead,
+(`kStarInnerRatio`), the turn bounds and `kStarTimeout` stay in the code. `Play` counts `star_wait` down once `World::eaten` has reached
+`star.unlock_diamonds` — held, not drained, until then, the same as the hazard
+gates — and when `spawn_star()` places
+one on screen — anywhere `star.edge_margin` clear of the window edge, that
+margin trimmed at spawn to what the window can spare rather than starving the
+band it picks from, and clear of any planted hazard, since the ball is sent
+*straight* to a star and one sitting on a triangle would be a trap with no way
+around it — the phase switches to `StarLook`: the ball stops dead,
 holds `star.pause` still facing the way it was going, and only then does the eye
 come around to the star. The phase ends once that turn lands. `kStarTurnMin` and
 `kStarTurnMax` are both measured *from the end of the pause*, which matters:
@@ -207,8 +275,9 @@ is the escape hatch: at `circle.speed` of 0 the ball would never arrive.
 `Play`, `StarSeek` and `StarReturn` share `move_square()` and `age_boost()`,
 which is why the square still steers and a boost still expires mid-star.
 
-Rendering is immediate-mode SDL — clear to background, the top dots, the square
-rect, the diamond, the ball (or its shards), then the fade — which is what puts
+Rendering is immediate-mode SDL — clear to background, the square as a hollow
+frame (`square.outline` nested `SDL_RenderDrawRect`s, so a diamond under it
+shows through), the diamond, the ball (or its shards), then the fade — which is what puts
 the pickup over the square but under the ball. `fill_circle()` draws one
 `SDL_RenderDrawLine` span per pixel row and is the only circle primitive: ball,
 dots and shards all go through it, all in `circle_color`; `fill_diamond()` is
@@ -216,8 +285,9 @@ the same row-by-row fill with a linear taper. `fill_polygon()` covers what a clo
 even-odd scanline fill over sorted edge crossings — same one-line-per-row idea;
 `fill_star()` (concave, ten points) and `fill_triangle()` (three, one corner
 leading) both build their outline and hand it over. The diamond's green is the
-only hardcoded color left. The star draws last of the field, over the ball, so only
-the fade covers it: a full-window black rect at `fade_alpha()`, which is why the
+only hardcoded color left. The star draws last of the play field, over the ball. Last of all come the two
+HUD rows — the hits left along the top, the diamonds eaten along the bottom —
+which nothing on the field can cover; only the fade goes over them: a full-window black rect at `fade_alpha()`, which is why the
 renderer is put in `SDL_BLENDMODE_BLEND` at startup.
 
 **R reloads config.json** at runtime (resizes the window, rebuilds the world,
