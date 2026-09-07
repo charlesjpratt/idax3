@@ -119,6 +119,18 @@ struct Config {
     float     still_hazard_arm     = 2.0f; // harmless outline before it arms
     float     still_hazard_life    = 4.0f; // dangerous seconds after that
     int       still_hazard_unlock  = 0;
+
+    // The tube. The field is drawn at window size and only then put on the
+    // window through a curved mesh, so all of this is presentation: it changes
+    // what the game looks like, never where anything is or what it touches.
+    bool  crt_enabled    = true;
+    float crt_curvature  = 0.10f;  // how far the glass bows; 0 is a flat panel
+    float crt_scanlines  = 0.22f;  // how dark the gap between lines goes
+    float crt_line_gap   = 3.0f;   // pixels from one scanline to the next
+    float crt_vignette   = 0.35f;  // how far the corners fall off
+    float crt_glow       = 0.45f;  // phosphor bloom, lifted off a blurred copy
+    float crt_aberration = 0.003f; // red/blue split at the rim, as a fraction
+                                   // of the picture — 0 at the center either way
 };
 
 namespace config_detail {
@@ -200,7 +212,11 @@ inline Config load_config(std::string* loaded_from = nullptr,
 
         nlohmann::json root;
         try {
-            file >> root;
+            // Parsed with comments allowed. The file is meant to be annotated
+            // and retuned by hand, and a note next to a value is half of what
+            // makes it tunable — strict JSON would throw the whole file out
+            // over one of them.
+            root = nlohmann::json::parse(file, nullptr, true, true);
         } catch (const std::exception& e) {
             if (error) *error = path + ": " + e.what();
             return cfg;
@@ -220,6 +236,7 @@ inline Config load_config(std::string* loaded_from = nullptr,
         const nlohmann::json hexagon    = sub_object(root, "hexagon");
         const nlohmann::json moving_hazard = sub_object(root, "moving_hazard");
         const nlohmann::json still_hazard  = sub_object(root, "still_hazard");
+        const nlohmann::json crt           = sub_object(root, "crt");
 
         cfg.window_w = window.value("width",  cfg.window_w);
         cfg.window_h = window.value("height", cfg.window_h);
@@ -290,6 +307,14 @@ inline Config load_config(std::string* loaded_from = nullptr,
         cfg.still_hazard_unlock  =
             still_hazard.value("unlock_diamonds", cfg.still_hazard_unlock);
 
+        cfg.crt_enabled    = crt.value("enabled",    cfg.crt_enabled);
+        cfg.crt_curvature  = crt.value("curvature",  cfg.crt_curvature);
+        cfg.crt_scanlines  = crt.value("scanlines",  cfg.crt_scanlines);
+        cfg.crt_line_gap   = crt.value("line_gap",   cfg.crt_line_gap);
+        cfg.crt_vignette   = crt.value("vignette",   cfg.crt_vignette);
+        cfg.crt_glow       = crt.value("glow",       cfg.crt_glow);
+        cfg.crt_aberration = crt.value("aberration", cfg.crt_aberration);
+
         if (loaded_from) *loaded_from = path;
         break;
     }
@@ -356,5 +381,18 @@ inline Config load_config(std::string* loaded_from = nullptr,
     // Long enough to be seen and steered around.
     cfg.still_hazard_life   = std::max(cfg.still_hazard_life, 0.5f);
     cfg.still_hazard_unlock = std::max(cfg.still_hazard_unlock, 0);
+
+    // Past about a quarter the picture folds in on itself at the corners.
+    cfg.crt_curvature = std::clamp(cfg.crt_curvature, 0.0f, 0.25f);
+    cfg.crt_scanlines = std::clamp(cfg.crt_scanlines, 0.0f, 1.0f);
+    // A gap under a pixel has no gap in it, and the mask is built a row at a
+    // time, so keep it to something a row can actually hold.
+    cfg.crt_line_gap   = std::clamp(cfg.crt_line_gap, 1.0f, 64.0f);
+    cfg.crt_vignette   = std::clamp(cfg.crt_vignette, 0.0f, 1.0f);
+    // The bloom is laid down at this as an alpha, so a full lift is the most
+    // light there is to add.
+    cfg.crt_glow       = std::clamp(cfg.crt_glow, 0.0f, 1.0f);
+    // Enough to tint an edge, never enough to tear the picture into three.
+    cfg.crt_aberration = std::clamp(cfg.crt_aberration, 0.0f, 0.05f);
     return cfg;
 }

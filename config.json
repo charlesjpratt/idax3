@@ -7,8 +7,8 @@
     "color": "#000000"
   },
   "square": {
-    "width": 280,
-    "height": 280,
+    "width": 300,
+    "height": 300,
     "speed": 190,
     "acceleration": 650,
     "friction": 4200,
@@ -19,12 +19,12 @@
     "min_size": 30
   },
   "circle": {
-    "diameter": 30,
+    "diameter": 20,
     "speed": 170,
     "color": "#FF1493",
     "start_x": 0.5,
     "start_y": 0.65,
-    "growth_per_diamond": 1.05,
+    "growth_per_diamond": 1.1,
     "collider_scale": 0.75
   },
   "star": {
@@ -69,5 +69,17 @@
     "arm": 2,
     "life": 4,
     "unlock_diamonds": 5
+  },
+  // The tube the game is shown through. All of it is presentation: it changes
+  // how the game looks, never where anything is or what it touches. R reloads
+  // the file, so these can be tuned with the game running.
+  "crt": {
+    "enabled": false,    // false skips the whole pass and shows a flat picture
+    "curvature": 0.03,   // how far the glass bows; 0 is a flat panel, 0.25 a fishbowl
+    "scanlines": 0.1,    // how dark the gaps between the lines go; 0 is none
+    "line_gap": 3,       // game pixels from one scanline to the next
+    "vignette": 0.35,    // how far the corners fall away into the dark
+    "glow": 0.3,         // phosphor bloom off the bright shapes; 1 is the most there is
+    "aberration": 0.005  // red/blue split, as a fraction of the picture's width
   }
 }

@@ -7,11 +7,19 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace {
 
 constexpr double kFixedStep = 1.0 / 120.0; // physics tick
 constexpr double kMaxFrame  = 0.25;        // don't spiral after a stall
+
+// The window edge lights up where the square has run out of room against it.
+// The clamp in move_square() lands the box exactly on the boundary, so the gap
+// counted as a touch only has to survive the rounding into pixels.
+constexpr float     kEdgeWidth = 4.0f; // thickness of the lit bar
+constexpr float     kEdgeTouch = 0.5f; // gap still counted as against the edge
+constexpr SDL_Color kEdgeColor{0xFF, 0xFF, 0xFF, 0xFF};
 
 // Three small dots centered along the top edge: the hits the ball has left.
 constexpr int   kDotCount   = 3;
@@ -67,19 +75,24 @@ constexpr float kGrowCeil   = 0.48f; // of the square's shorter side, per radius
 constexpr float kStarInnerRatio = 0.44f; // waist of the points, per outer radius
 constexpr float kStarTimeout    = 6.0f;  // a crawling ball would never arrive
 
-// The eye: a bare pupil on the pink, no white behind it. It points where the
-// ball is headed, turning at a fixed rate rather than snapping, which is what
-// makes it read as looking.
-constexpr SDL_Color kEyePupil{0x24, 0x1E, 0x2B, 0xFF};
+// The eye: a bare pupil on the pink, no white behind it, just a speck of one
+// caught in its right-hand end. It points where the ball is headed, turning at
+// a fixed rate rather than snapping, which is what makes it read as looking.
+constexpr SDL_Color kEyePupil{0x00, 0x00, 0x00, 0xFF};
+constexpr SDL_Color kEyeGlint{0xFF, 0xFF, 0xFF, 0xFF};
 // Sizes and travel are all fractions of the ball's radius, so the eye scales
 // with it. Rise and travel together keep the pupil in the ball's top two
-// thirds: at full reach the capsule grazes the rim going up and stops level
-// with the two-thirds line coming down.
-constexpr float kPupilSize   = 0.25f; // pupil radius, per ball radius
-constexpr float kEyeRise     = 0.333f; // eye's rest point above center
-constexpr float kEyeTravel   = 0.45f; // how far the pupil roams from that point
+// thirds: at full reach the capsule comes short of the rim going up and stops
+// about level with the two-thirds line coming down.
+constexpr float kPupilSize   = 0.21f; // pupil radius, per ball radius
+constexpr float kEyeRise     = 0.25f; // eye's rest point above center
+constexpr float kEyeTravel   = 0.38f; // how far the pupil roams from that point
 constexpr float kPupilStretch = 0.42f; // capsule half-length, per pupil radius
 constexpr float kPupilThin    = 0.72f; // capsule cap radius, per pupil radius
+// Both per cap radius, and they add up to less than one, which is what keeps
+// the highlight from breaking the edge of the ink it sits in.
+constexpr float kGlintSize    = 0.34f; // highlight radius
+constexpr float kGlintRise    = 0.30f; // how far off the middle of the cap it sits
 constexpr float kEyeTurnRate = 9.0f;  // radians per second
 constexpr float kEyeAimed    = 0.02f; // close enough to call the turn finished
 constexpr float kGazeRate    = 4.0f;  // how fast the pupil slides out and back
@@ -178,10 +191,14 @@ struct World {
     float circle_x = 0.0f, circle_y = 0.0f;
     float circle_vx = 0.0f, circle_vy = 0.0f;
 
-    Phase phase = Phase::Play;
+    // A world opens by fading up out of black, the same way one rebuilt behind
+    // a death does — the reset in FadeOut moves it straight on to Black, so
+    // that sequence still holds before it reveals anything.
+    Phase phase = Phase::FadeIn;
     float timer = 0.0f; // time spent in the current phase
     float grace = 0.0f; // hit immunity left
     bool  ball_alive = true;
+    bool  started = false; // has the player taken hold of the square yet
     std::array<Dot, kDotCount> dots{};
     std::array<Shard, kShardCount> shards{};
 
@@ -385,6 +402,13 @@ void spawn_diamond(World& w, const Config& cfg) {
 // Runs the pickup: count down to the next spawn, then wait for the ball to
 // reach the one on the field and hand out the boost.
 void update_diamond(World& w, const Config& cfg, float dt) {
+    // The opening is just the ball bouncing: nothing spawns until the player
+    // first drives the square. The timer holds rather than drains while it
+    // waits — like the hazard and star gates — so the first diamond arrives a
+    // full gap after that push, not the instant it lands. Nothing can be on
+    // the field to collect yet, so there is nothing else to run down here.
+    if (!w.started) return;
+
     if (!w.diamond.active) {
         w.diamond_wait -= dt;
         if (w.diamond_wait <= 0.0f) {
@@ -1021,11 +1045,15 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
     switch (w.phase) {
     case Phase::Play: {
         const bool square_moving = move_square(w, cfg, keys, dt);
+        if (square_moving) w.started = true; // the run proper begins here
 
         // Only open play closes the walls in: a diamond boost holds them, and
         // so does every star phase, none of which come through here. A hexagon's
-        // recovery holds them too, until it has finished opening them out.
-        if (!grow_square(w, cfg, dt) && w.boost <= 0.0f) shrink_square(w, cfg, dt);
+        // recovery holds them too, until it has finished opening them out. So
+        // does the opening, until the player has taken hold of the square.
+        if (!grow_square(w, cfg, dt) && w.boost <= 0.0f && w.started) {
+            shrink_square(w, cfg, dt);
+        }
 
         // Let the speed boost lapse before the bounce, so a tick is never
         // integrated at one speed and reflected at another.
@@ -1262,9 +1290,18 @@ void fill_eye(SDL_Renderer* renderer, const World& w, float cx, float cy, float 
     // The stretch goes with `gaze` too, so a centered eye is a plain circle.
     const float half_len = pupil_r * kPupilStretch * w.gaze;
 
+    const float cap_r = pupil_r * kPupilThin;
     set_draw_color(renderer, kEyePupil);
-    fill_capsule(renderer, px - half_len, py, px + half_len, py,
-                 pupil_r * kPupilThin);
+    fill_capsule(renderer, px - half_len, py, px + half_len, py, cap_r);
+
+    // A speck of white in the right-hand end, lifted just off the middle of the
+    // cap. Both are fractions of the cap, so the highlight rides every scale the
+    // eye does — the ball's growth, and `gaze` pulling the capsule closed — and
+    // it stays put in the corner rather than swimming as the pupil turns, since
+    // the capsule never rotates. fill_circle() bottoms out at a single pixel, so
+    // on a small ball this is a dot rather than nothing at all.
+    set_draw_color(renderer, kEyeGlint);
+    fill_circle(renderer, px + half_len, py - cap_r * kGlintRise, cap_r * kGlintSize);
 }
 
 // Even-odd scanline fill: one line per pixel row, spans between sorted edge
@@ -1394,7 +1431,241 @@ Uint8 fade_alpha(const World& w) {
     return static_cast<Uint8>(std::lround(std::clamp(amount, 0.0f, 1.0f) * 255.0f));
 }
 
-void render(SDL_Renderer* renderer, const World& w, const Config& cfg) {
+
+// -- The tube ----------------------------------------------------------------
+// Everything above draws in config-space pixels and never learns what the
+// window is really showing; this is the only code that knows. The field goes to
+// an off-screen frame at config size, and that frame is what gets bent onto the
+// glass. SDL's 2D renderer has no shader stage, so the curve lives in vertex
+// positions and the vignette in vertex colors, over a mesh fine enough that the
+// shading between its corners reads as a gradient.
+
+constexpr int kTubeCols  = 32; // mesh resolution, across and down
+constexpr int kTubeRows  = 24;
+constexpr int kTubeVerts = (kTubeCols + 1) * (kTubeRows + 1);
+constexpr int kTubeIndex = kTubeCols * kTubeRows * 6;
+constexpr int kGlowStep  = 2;  // each blur pass halves the picture
+
+struct Screen {
+    SDL_Texture* frame = nullptr; // the field, drawn at config size
+    SDL_Texture* half  = nullptr; // halfway down to the blur
+    SDL_Texture* glow  = nullptr; // quarter size, added back for phosphor bloom
+    SDL_Texture* lines = nullptr; // 1 x height scanline mask
+};
+
+void free_screen(Screen& s) {
+    if (s.frame) SDL_DestroyTexture(s.frame);
+    if (s.half)  SDL_DestroyTexture(s.half);
+    if (s.glow)  SDL_DestroyTexture(s.glow);
+    if (s.lines) SDL_DestroyTexture(s.lines);
+    s = Screen{};
+}
+
+// Sized off the config, so a reload rebuilds it. A failure here leaves `frame`
+// null, which every pass below reads as "the game drew straight to the window"
+// - a renderer that cannot hold a target still gets a game, just a flat one.
+void build_screen(Screen& s, SDL_Renderer* renderer, const Config& cfg) {
+    free_screen(s);
+
+    s.frame = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+                                SDL_TEXTUREACCESS_TARGET, cfg.window_w, cfg.window_h);
+    if (!s.frame) {
+        SDL_Log("no render target (%s); CRT off", SDL_GetError());
+        return;
+    }
+    SDL_SetTextureScaleMode(s.frame, SDL_ScaleModeLinear);
+    // Everything is laid onto black and added, so the three color passes sum
+    // instead of painting over one another.
+    SDL_SetTextureBlendMode(s.frame, SDL_BLENDMODE_ADD);
+
+    const int half_w = std::max(cfg.window_w / kGlowStep, 1);
+    const int half_h = std::max(cfg.window_h / kGlowStep, 1);
+    s.half = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+                               SDL_TEXTUREACCESS_TARGET, half_w, half_h);
+    s.glow = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+                               SDL_TEXTUREACCESS_TARGET,
+                               std::max(half_w / kGlowStep, 1),
+                               std::max(half_h / kGlowStep, 1));
+    for (SDL_Texture* tex : {s.half, s.glow}) {
+        if (!tex) continue;
+        SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
+        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_ADD);
+    }
+
+    // The scanline mask: one pixel wide, one row per config-space row, black at
+    // whatever alpha the gaps want. It is stretched with the picture rather than
+    // built per output pixel, so the lines keep their relationship to the art at
+    // any window size - `line_gap` is tuned against the game, not the monitor.
+    // The band is a cosine rather than a hard row, which keeps it from beating
+    // against the pixel grid once the curve has stretched it.
+    if (cfg.crt_scanlines > 0.0f) {
+        std::vector<Uint32> mask(static_cast<size_t>(cfg.window_h));
+        for (int y = 0; y < cfg.window_h; ++y) {
+            const float phase = 2.0f * 3.14159265f * static_cast<float>(y) / cfg.crt_line_gap;
+            const float dark  = 0.5f - 0.5f * std::cos(phase);
+            const Uint32 alpha = static_cast<Uint32>(
+                std::lround(std::clamp(cfg.crt_scanlines * dark, 0.0f, 1.0f) * 255.0f));
+            mask[static_cast<size_t>(y)] = alpha << 24; // black, so only alpha carries
+        }
+        s.lines = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+                                    SDL_TEXTUREACCESS_STATIC, 1, cfg.window_h);
+        if (s.lines) {
+            SDL_UpdateTexture(s.lines, nullptr, mask.data(), sizeof(Uint32));
+            SDL_SetTextureScaleMode(s.lines, SDL_ScaleModeLinear);
+            SDL_SetTextureBlendMode(s.lines, SDL_BLENDMODE_BLEND); // this one darkens
+        }
+    }
+}
+
+// Where the picture sits in the window: as large as it goes with its shape kept,
+// centered, black either side. This is all that fullscreen actually changes.
+SDL_FRect picture_rect(SDL_Renderer* renderer, const Config& cfg) {
+    int out_w = cfg.window_w;
+    int out_h = cfg.window_h;
+    SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
+    const float scale = std::min(static_cast<float>(out_w) / static_cast<float>(cfg.window_w),
+                                 static_cast<float>(out_h) / static_cast<float>(cfg.window_h));
+    const float w = static_cast<float>(cfg.window_w) * scale;
+    const float h = static_cast<float>(cfg.window_h) * scale;
+    return SDL_FRect{(static_cast<float>(out_w) - w) * 0.5f,
+                     (static_cast<float>(out_h) - h) * 0.5f, w, h};
+}
+
+// One pass of a texture onto the glass. `spread` scales the whole picture about
+// its center, which is the whole of the color fringing: the same image laid down
+// three times at three sizes, one channel each, so the split is nothing in the
+// middle and widest at the rim.
+void draw_tube(SDL_Renderer* renderer, SDL_Texture* tex, const SDL_FRect& dest,
+               const Config& cfg, float spread, SDL_Color tint) {
+    if (!tex) return;
+
+    std::array<SDL_Vertex, kTubeVerts> verts{};
+    std::array<int, kTubeIndex> index{};
+
+    const float mid_x  = dest.x + dest.w * 0.5f;
+    const float mid_y  = dest.y + dest.h * 0.5f;
+    // The pull below draws every edge in, so open the mesh back out by what it
+    // takes off an edge midpoint: those meet the window exactly, and the corners
+    // - drawn in harder, on a longer radius - stay inside it as rounded black.
+    const float fill   = 1.0f + cfg.crt_curvature;
+    const float half_w = dest.w * 0.5f * spread * fill;
+    const float half_h = dest.h * 0.5f * spread * fill;
+
+    for (int row = 0; row <= kTubeRows; ++row) {
+        for (int col = 0; col <= kTubeCols; ++col) {
+            const float u = static_cast<float>(col) / static_cast<float>(kTubeCols);
+            const float v = static_cast<float>(row) / static_cast<float>(kTubeRows);
+            const float nx = u * 2.0f - 1.0f;
+            const float ny = v * 2.0f - 1.0f;
+            const float r2 = nx * nx + ny * ny; // 1 at the edge midpoints, 2 at the corners
+
+            // Draw the grid in toward the middle by the square of how far out it
+            // is. The picture packs together as it nears the rim the way it does
+            // on curved glass, and its own edges bow outward into the rounded
+            // shape of a tube face - corners pulled in furthest, which is what
+            // keeps the whole picture inside the window with no overscan to trim.
+            const float pull = 1.0f / (1.0f + cfg.crt_curvature * r2);
+
+            // The corners fall off, on the same r^2 the curve rides. Only the
+            // color is shaded, never the alpha, so the mask laid over the top
+            // darkens by as much at the rim as it does in the middle.
+            const float shade = std::clamp(1.0f - cfg.crt_vignette * r2 * 0.5f, 0.0f, 1.0f);
+
+            SDL_Vertex& vert = verts[static_cast<size_t>(row * (kTubeCols + 1) + col)];
+            vert.position.x  = mid_x + nx * pull * half_w;
+            vert.position.y  = mid_y + ny * pull * half_h;
+            vert.tex_coord.x = u;
+            vert.tex_coord.y = v;
+            vert.color.r = static_cast<Uint8>(std::lround(static_cast<float>(tint.r) * shade));
+            vert.color.g = static_cast<Uint8>(std::lround(static_cast<float>(tint.g) * shade));
+            vert.color.b = static_cast<Uint8>(std::lround(static_cast<float>(tint.b) * shade));
+            vert.color.a = tint.a;
+        }
+    }
+
+    int at = 0;
+    for (int row = 0; row < kTubeRows; ++row) {
+        for (int col = 0; col < kTubeCols; ++col) {
+            const int top_left  = row * (kTubeCols + 1) + col;
+            const int top_right = top_left + 1;
+            const int low_left  = top_left + (kTubeCols + 1);
+            const int low_right = low_left + 1;
+            index[static_cast<size_t>(at++)] = top_left;
+            index[static_cast<size_t>(at++)] = top_right;
+            index[static_cast<size_t>(at++)] = low_right;
+            index[static_cast<size_t>(at++)] = top_left;
+            index[static_cast<size_t>(at++)] = low_right;
+            index[static_cast<size_t>(at++)] = low_left;
+        }
+    }
+
+    SDL_RenderGeometry(renderer, tex, verts.data(), kTubeVerts,
+                       index.data(), kTubeIndex);
+}
+
+// Clear a target and lay the whole of `src` over it - one step of the blur.
+void copy_into(SDL_Renderer* renderer, SDL_Texture* target, SDL_Texture* src) {
+    if (!target || !src) return;
+    SDL_SetRenderTarget(renderer, target);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xFF);
+    SDL_RenderClear(renderer); // the copy adds, so it can't be laid on stale light
+    SDL_RenderCopy(renderer, src, nullptr, nullptr);
+}
+
+// The finished frame onto the window: curve, fringe, bloom, scanlines, present.
+void present_screen(SDL_Renderer* renderer, const Screen& screen, const Config& cfg) {
+    if (!screen.frame) { // no render target - the game drew straight to the window
+        SDL_RenderPresent(renderer);
+        return;
+    }
+
+    const bool glowing = cfg.crt_enabled && cfg.crt_glow > 0.0f;
+    if (glowing) {
+        // Two halvings: each is a bilinear filter averaging a 2x2 block, which
+        // buys a box blur for the price of two blits. Going straight down to a
+        // quarter would skip three pixels in four instead of averaging them.
+        copy_into(renderer, screen.half, screen.frame);
+        copy_into(renderer, screen.glow, screen.half);
+    }
+
+    SDL_SetRenderTarget(renderer, nullptr);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xFF);
+    SDL_RenderClear(renderer); // the letterbox, and the corners the curve leaves bare
+
+    const SDL_FRect dest = picture_rect(renderer, cfg);
+    if (!cfg.crt_enabled) {
+        SDL_RenderCopyF(renderer, screen.frame, nullptr, &dest);
+        SDL_RenderPresent(renderer);
+        return;
+    }
+
+    // The picture. Laid onto black and added, so three channel passes that line
+    // up sum back to exactly the image - which is what happens in the middle, by
+    // construction, with the split opening up toward the rim.
+    if (cfg.crt_aberration > 0.0f) {
+        const float split = cfg.crt_aberration;
+        draw_tube(renderer, screen.frame, dest, cfg, 1.0f + split, SDL_Color{0xFF, 0, 0, 0xFF});
+        draw_tube(renderer, screen.frame, dest, cfg, 1.0f,         SDL_Color{0, 0xFF, 0, 0xFF});
+        draw_tube(renderer, screen.frame, dest, cfg, 1.0f - split, SDL_Color{0, 0, 0xFF, 0xFF});
+    } else {
+        draw_tube(renderer, screen.frame, dest, cfg, 1.0f, SDL_Color{0xFF, 0xFF, 0xFF, 0xFF});
+    }
+
+    if (glowing) {
+        const Uint8 lift = static_cast<Uint8>(std::lround(cfg.crt_glow * 255.0f));
+        draw_tube(renderer, screen.glow, dest, cfg, 1.0f, SDL_Color{0xFF, 0xFF, 0xFF, lift});
+    }
+
+    // Last of all, over the lit picture and curved along with it.
+    draw_tube(renderer, screen.lines, dest, cfg, 1.0f, SDL_Color{0xFF, 0xFF, 0xFF, 0xFF});
+
+    SDL_RenderPresent(renderer);
+}
+
+void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
+            const Config& cfg) {
+    // All of this lands on the off-screen frame; the tube pass puts it up.
+    SDL_SetRenderTarget(renderer, screen.frame);
     set_draw_color(renderer, cfg.background_color);
     SDL_RenderClear(renderer);
 
@@ -1415,6 +1686,31 @@ void render(SDL_Renderer* renderer, const World& w, const Config& cfg) {
                             square.w - 2 * i, square.h - 2 * i};
         if (edge.w <= 0 || edge.h <= 0) break;
         SDL_RenderDrawRect(renderer, &edge);
+    }
+
+    // A wall the square has run out of room against lights up down the whole of
+    // that screen edge, so the dead stop reads as the window's and not the
+    // box's. It carries the frame's own alpha: park against an edge and the
+    // highlight dims with the square, and firms up again as it is driven.
+    SDL_Color edge = kEdgeColor;
+    edge.a = static_cast<Uint8>(std::lround(static_cast<float>(edge.a) * w.square_alpha));
+    set_draw_color(renderer, edge);
+    const int bar = static_cast<int>(std::lround(kEdgeWidth));
+    if (w.square_x <= kEdgeTouch) {
+        const SDL_Rect lit{0, 0, bar, cfg.window_h};
+        SDL_RenderFillRect(renderer, &lit);
+    }
+    if (w.square_x + w.square_w >= static_cast<float>(cfg.window_w) - kEdgeTouch) {
+        const SDL_Rect lit{cfg.window_w - bar, 0, bar, cfg.window_h};
+        SDL_RenderFillRect(renderer, &lit);
+    }
+    if (w.square_y <= kEdgeTouch) {
+        const SDL_Rect lit{0, 0, cfg.window_w, bar};
+        SDL_RenderFillRect(renderer, &lit);
+    }
+    if (w.square_y + w.square_h >= static_cast<float>(cfg.window_h) - kEdgeTouch) {
+        const SDL_Rect lit{0, cfg.window_h - bar, cfg.window_w, bar};
+        SDL_RenderFillRect(renderer, &lit);
     }
 
     // The square's pickup sits with the ball's: over the frame, under the ball.
@@ -1520,7 +1816,7 @@ void render(SDL_Renderer* renderer, const World& w, const Config& cfg) {
         SDL_RenderFillRect(renderer, nullptr);
     }
 
-    SDL_RenderPresent(renderer);
+    present_screen(renderer, screen, cfg);
 }
 
 Config load_and_report() {
@@ -1565,9 +1861,17 @@ int main(int, char**) {
     }
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND); // for the fade
 
+    // The whole game is laid out against cfg.window_w/h, and it draws into a
+    // frame of exactly that size; the tube pass is what fits the frame to the
+    // window. So fullscreen scales the picture rather than widening the field,
+    // and nothing above present_screen() knows which one it is looking at.
+    Screen screen;
+    build_screen(screen, renderer, cfg);
+
     World world = make_world(cfg);
 
     bool running = true;
+    bool fullscreen = false;
     Uint64 previous = SDL_GetPerformanceCounter();
     double accumulator = 0.0;
 
@@ -1579,10 +1883,20 @@ int main(int, char**) {
             } else if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
                 if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
                     running = false;
+                } else if (event.key.keysym.scancode == SDL_SCANCODE_F) {
+                    fullscreen = !fullscreen;
+                    SDL_SetWindowFullscreen(
+                        window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
                 } else if (event.key.keysym.scancode == SDL_SCANCODE_R) {
                     // Re-read config.json so tweaking values needs no rebuild.
                     cfg = load_and_report();
-                    SDL_SetWindowSize(window, cfg.window_w, cfg.window_h);
+                    // A fullscreen window has no size to set; the frame is
+                    // what a reload resizes there. Rebuilt either way, since
+                    // the whole crt section is baked into it.
+                    if (!fullscreen) {
+                        SDL_SetWindowSize(window, cfg.window_w, cfg.window_h);
+                    }
+                    build_screen(screen, renderer, cfg);
                     world = make_world(cfg);
                 }
             }
@@ -1600,9 +1914,10 @@ int main(int, char**) {
             accumulator -= kFixedStep;
         }
 
-        render(renderer, world, cfg);
+        render(renderer, screen, world, cfg);
     }
 
+    free_screen(screen);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();

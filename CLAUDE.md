@@ -16,7 +16,8 @@ are pulled by FetchContent; a post-build step copies `SDL2.dll` next to the exe.
 ## Architecture
 
 Two files. `src/Config.hpp` is the header-only config layer, `src/main.cpp` is
-the whole game.
+the whole game — the simulation, the renderer, and the CRT pass that puts the
+rendered frame on the glass.
 
 **Config (`src/Config.hpp`):** `load_config()` walks `config_search_paths()` —
 cwd first, then exe-relative with one and two `..` hops — and uses the first
@@ -63,7 +64,12 @@ position: `square.acceleration` builds `World::square_vx`/`vy` up to
 line — and `square.friction` scrubs it off once the keys are let go, never
 overshooting into reverse. Friction well above acceleration is what makes it
 read as stopping dead while still having weight. The window edge zeroes the
-velocity on that axis rather than letting the box scrape along at speed.
+velocity on that axis rather than letting the box scrape along at speed, and
+lights up white down the whole of that screen edge while the square is against
+it — `kEdgeWidth` thick, at `kEdgeTouch` of slack, which only has to cover the
+rounding into pixels since the clamp lands the box exactly on the boundary. It
+is drawn with the square and carries `World::square_alpha`, so an edge parked
+against dims with the frame and firms up again as it is driven.
 
 A frame that isn't going anywhere fades to `square.idle_alpha` and firms up
 again as it moves, eased through `World::square_alpha` so it doesn't flicker on
@@ -83,6 +89,21 @@ knocks the rightmost dot in the top row loose. `update_dots()` runs in *every*
 phase, so that dot keeps arcing off the bottom of the screen while play resumes
 around it — over the top of the field, since the dots are HUD.
 
+A world *opens* on `Phase::FadeIn` — that is the `World::phase` default, so
+startup and an R reload both fade up out of black instead of snapping in, and
+the ball holds still until the fade lands. The death sequence is unchanged by
+it: `FadeOut`'s rebuild sets `Black` on the fresh world immediately after
+`make_world()`, so the hold still happens before anything is revealed.
+
+The opening also waits on the player. `World::started` turns on the first tick
+`move_square()` reports a key in `Phase::Play`, and until it does, the square
+does not shrink and `update_diamond()` returns early — the ball just bounces in
+a full-size frame. Both timers *hold* rather than drain while it waits, the same
+rule the hazard and star gates follow, so the first diamond comes a full gap
+after that first push. Everything downstream is gated on `World::eaten`, which
+cannot move before a diamond does, so one flag holds the whole field back. A
+reset clears it, so every life opens the same way.
+
 When `drop_next_dot()` takes the last one, the sequence continues
 `Shake → Burst → FadeOut → Black → FadeIn → Play` instead: `burst_ball()` clears
 `ball_alive` and calls `fan_shards()`, which throws a `std::array` of shards out
@@ -97,8 +118,8 @@ the top of the file.
 off `World::square_w`/`square_h` per second, through `resize_square()` — the one
 place the box changes size, which moves the corner by half the difference so the
 walls close in evenly around its own center instead of the box crawling one way.
-A hexagon's recovery goes through the same helper. It is called from `Phase::Play` only, and only while
-`boost` is spent — which is the whole pause rule: a diamond's speed boost holds
+A hexagon's recovery goes through the same helper. It is called from `Phase::Play` only, and only once
+`World::started` is set and while `boost` is spent — which is the whole pause rule: a diamond's speed boost holds
 the walls, and so does every star phase, since none of them run through `Play`.
 The floor is `square.min_size` or the ball's current diameter, whichever is
 larger, so the circle always fits however much diamonds have grown it; the
@@ -152,11 +173,15 @@ signal `StarLook` waits on. It also carries `World::gaze`, which eases to 0 duri
 by it — the pupil's reach, the socket's rise up the ball, and the capsule's
 stretch — so at rest on a star the eye slides to the middle of the body and
 collapses into a plain circle, all from the one factor. `fill_eye()` draws a bare pupil on the pink — no white behind it —
-a horizontal capsule the look direction moves but never rotates.
+a horizontal capsule the look direction moves but never rotates, with a speck of
+white caught in its right-hand end. `kGlintSize` and `kGlintRise` are fractions
+of the capsule's cap radius that sum to less than one, so the highlight never
+breaks the edge of the ink, and because the capsule holds its angle the glint
+stays in the corner instead of swimming around as the eye turns.
 `kPupilSize`, `kEyeRise` and `kEyeTravel` are all fractions of `ball_radius()`,
 so the eye scales with every diamond; rise and travel are picked together so
-that at full reach the capsule grazes the rim going up and stops level with the
-two-thirds line coming down, which is the band the eye roams. The bottom third
+that at full reach the capsule comes short of the rim going up and stops about
+level with the two-thirds line coming down, which is the band the eye roams. The bottom third
 reads as body — except at rest on a star, where `gaze` takes the rise out along
 with everything else.
 Everything is a fraction of `ball_radius()`, so the eye grows with every
@@ -278,7 +303,10 @@ which is why the square still steers and a boost still expires mid-star.
 Rendering is immediate-mode SDL — clear to background, the square as a hollow
 frame (`square.outline` nested `SDL_RenderDrawRect`s, so a diamond under it
 shows through), the diamond, the ball (or its shards), then the fade — which is what puts
-the pickup over the square but under the ball. `fill_circle()` draws one
+the pickup over the square but under the ball. None of it lands on the window:
+`render()` points the renderer at `Screen::frame`, an off-screen texture of
+exactly `window_w`/`window_h`, so every pass above works in config-space pixels
+and the tube below is the only code that knows what the window is showing. `fill_circle()` draws one
 `SDL_RenderDrawLine` span per pixel row and is the only circle primitive: ball,
 dots and shards all go through it, all in `circle_color`; `fill_diamond()` is
 the same row-by-row fill with a linear taper. `fill_polygon()` covers what a closed-form span cannot, with an
@@ -290,6 +318,52 @@ HUD rows — the hits left along the top, the diamonds eaten along the bottom �
 which nothing on the field can cover; only the fade goes over them: a full-window black rect at `fade_alpha()`, which is why the
 renderer is put in `SDL_BLENDMODE_BLEND` at startup.
 
+config.json is parsed with comments allowed (`json::parse(..., ignore_comments)`),
+so a value can carry a note on the line beside it — the file is meant to be
+annotated and retuned by hand, and strict JSON would throw the whole file out
+over one `//`.
+
 **R reloads config.json** at runtime (resizes the window, rebuilds the world,
 which also restores the dots and clears any phase in progress), which is the
 intended way to tune values without a rebuild.
+
+**F toggles fullscreen.** Every position in the game is derived from
+`cfg.window_w`/`window_h`, so fullscreen *scales* the picture instead of
+widening the field: `picture_rect()` fits the frame to the window with its
+shape kept and black either side, which is the whole of what the mode changes.
+A reload rebuilds the frame either way — the `crt` section is baked into it —
+and only sets the window size when windowed, since a fullscreen window has none
+to set.
+
+**The tube.** SDL's 2D renderer has no shader stage, so the CRT pass is built
+out of what it does have: `present_screen()` puts the finished frame up through
+`draw_tube()`, a 32x24 mesh of `SDL_RenderGeometry` triangles with the curve in
+its vertex positions and the vignette in its vertex colors, both driven off the
+same `r^2`. Each node is drawn toward the middle by `1/(1 + curvature*r^2)` —
+the picture packs together toward the rim the way it does on curved glass, and
+because the corners sit on the longer radius they come in hardest, which bows
+the edges outward into the shape of a tube face and keeps the whole picture
+inside the window with no overscan to trim. The mesh is then opened back out by
+`1 + curvature`, exactly what the pull takes off an edge midpoint, so the edges
+meet the window and only the corners stay black.
+
+Everything is added onto a black window, which is what makes the color fringing
+one function: `aberration` lays the same frame down three times at three sizes,
+a channel at a time, and passes that line up sum back to exactly the image — so
+the split is nothing at the center and widest at the rim. Then the bloom, off
+`Screen::glow`: two halvings through `copy_into()`, each a bilinear filter
+averaging a 2x2 block, which is a box blur for the price of two blits (straight
+to a quarter would skip three pixels in four instead of averaging them), added
+back over the same mesh at `glow`. Last is the scanline mask — one pixel wide,
+one row per config-space row, a cosine band rather than a hard row so it does
+not beat against the pixel grid once the curve stretches it — laid over the lit
+picture and curved along with it. It is stretched with the picture rather than
+built per output pixel, so `line_gap` is tuned against the art, not the monitor.
+
+`draw_tube()` shades only the vertex color and never the alpha, which is why the
+vignette dims the picture but leaves the mask darkening the rim by as much as
+the middle. `crt.enabled` false skips all of it for a plain `SDL_RenderCopyF`
+into the same rect, and a renderer that cannot hold a render target leaves
+`Screen::frame` null, which every pass reads as "the game already drew straight
+to the window" — a flat game, but a game. Since the whole section is config,
+R retunes the tube live.
