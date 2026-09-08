@@ -248,6 +248,14 @@ spawn timer:
   would be an unreactable hit, and clear of a star that is already out, the
   same rule from the other side. Tuned by the `still_hazard` section.
 
+Both kinds also get *faster*: `hazard_gap()` is what picks either wait, and past
+`kHazardRampAt` diamonds it scales the draw by `kHazardRamp`, so the rest of the
+life runs at a fraction of the gaps the config asks for. Scaling the draw rather
+than the config is what keeps the file honest — it still means what it says, and
+an R reload still reports its own numbers — and since it reads the same
+`World::eaten` as everything else, a reset takes the pressure off and the run
+earns it back.
+
 Both gates read `World::eaten`, the same tally the bottom row draws, and both
 timers *hold* rather than draining while locked — so the first hazard of a kind
 comes a full interval after the qualifying diamond, not the instant it is eaten.
@@ -295,7 +303,7 @@ player entirely. Everything about it is config — `star.size`, `star.color`,
 `star.gap_min`/`gap_max`, `star.edge_margin`, `star.pause`, `star.seek_speed`,
 `star.hold`, `star.spin_speed` and `star.unlock_diamonds` — so
 the whole effect is tunable with R; only the point geometry
-(`kStarInnerRatio`), the turn bounds and `kStarTimeout` stay in the code. `Play` counts `star_wait` down once `World::eaten` has reached
+(`kStarInnerRatio`), the turn bounds and the trip allowance stay in the code. `Play` counts `star_wait` down once `World::eaten` has reached
 `star.unlock_diamonds` — held, not drained, until then, the same as the hazard
 gates — and when `spawn_star()` places
 one on screen — anywhere `star.edge_margin` clear of the window edge, that
@@ -351,14 +359,59 @@ Otherwise the star clears, `launch_ball()`
 picks one of the four diagonals at the same speed — a random *angle* would let
 the ball crawl along a wall, so it releases on the same heading the game opens
 on, with two bits of the LCG choosing the quadrant — and `Play` resumes with
-`kHitGrace` set, since the ball may still be crossing back into the square. `kStarTimeout`
-is the escape hatch: at `circle.speed` of 0 the ball would never arrive.
+`kHitGrace` set, since the ball may still be crossing back into the square. The trip is allowed the
+window's own diagonal — the longest a straight line to a star can be — at the
+chase speed, times `kStarTripSlack`, with `kStarTripMin` as a floor. Measuring
+it rather than fixing it is the point: window size and both speeds are config,
+so any flat number is generous in one window and short of the far corner in
+another, and a chase cut off part way puts the ball into the hold holding a star
+it never reached. The floor is the real escape hatch, for `circle.speed` at 0
+where there is no arriving at all — and it snaps the ball onto the star on its
+way out, since a hold anywhere else reads as catching something it never got
+to.
 
 `Play`, `StarSeek` and `StarReturn` share `move_square()` and `age_boost()`,
 which is why the square still steers and a boost still expires mid-star.
 
-Rendering is immediate-mode SDL — clear to background, the square as a hollow
-frame (`square.outline` nested `SDL_RenderDrawRect`s, so a diamond under it
+**The backdrop.** `build_backdrop()` fills the window with overlapping blue
+circles, and `render()` lays them down before anything else. They are on a grid,
+which is what lets the coverage be guaranteed instead of hoped for: a tile's
+diameter is never under `kBackSizeMin` of its cell, which is `sqrt(2)` — a
+circle has to reach its cell's corners, where a square only had to reach its
+sides — plus twice `kBackJitter` *and* twice `kBackOrbit` for everywhere
+wandering and turning can take it. From anywhere it can get to it still covers
+the cell it came from, so no black shows between them. Each is one stretched
+copy of `Screen::disc`, a single white circle tinted per tile with
+`SDL_SetTextureColorMod`: circles this size drawn a row at a time would be tens
+of thousands of line calls a frame, where this is one textured quad each, and
+the upscale is also what softens the rim — a row of spans could not. The disc is
+built with the other screen resources, and a backdrop falls back to squares if
+it could not be made.
+
+The tiles are shuffled once they are built. Drawn in the order the grid makes
+them, each would overlap the one up and left of it and the grid would come back
+as a shingle leaning one way; shuffling touches only which of two overlapping
+circles ends up on top, never where any of them are, so the coverage argument
+above is untouched. Each tile walks a small circle of `kBackOrbit`, all at `kBackSpin` and all
+the same way round, differing only in where on it they start — one draw per tile
+at build time — so the field turns without moving as a sheet. `World::drift` is
+its clock and is advanced in `step()` before the phase switch, so the backdrop
+keeps turning through shakes, bursts and fades, which are exactly the moments
+the rest of the world is holding still. Size and jitter then vary enough that
+the grid does not read as one. Hues are a mix of `kBackDeep` and one of two lifts:
+`kBackLift` for blue, or `kBackViolet` for the `kBackVioletShare` of tiles that
+come out purple instead — enough to be noticed, not enough to become the color
+of the backdrop. Both ends of both mixes are dark, which is what lets the mix
+run its whole range without lifting the field off the bottom: the pink, the
+aquamarine and the red all have to stay the lit things on it. A
+window too big for the pool coarsens the grid rather than leaving holes in it.
+It is built in `make_world()` off `World::rng`, so it holds still while the game
+runs over it and comes back different after a reset or an R reload — and behind
+the fade, so a death reveals a new one already in place. `background.color` now
+only shows through the gaps, of which there are none.
+
+Rendering is immediate-mode SDL — clear to background, the backdrop, the square
+as a hollow frame (`square.outline` nested `SDL_RenderDrawRect`s, so a diamond under it
 shows through), the diamond, the ball (or its shards), then the fade — which is what puts
 the pickup over the square but under the ball. None of it lands on the window:
 `render()` points the renderer at `Screen::frame`, an off-screen texture of
@@ -417,10 +470,17 @@ Everything is added onto a black window, which is what makes the color fringing
 one function: `aberration` lays the same frame down three times at three sizes,
 a channel at a time, and passes that line up sum back to exactly the image — so
 the split is nothing at the center and widest at the rim. Then the bloom, off
-`Screen::glow`: two halvings through `copy_into()`, each a bilinear filter
-averaging a 2x2 block, which is a box blur for the price of two blits (straight
-to a quarter would skip three pixels in four instead of averaging them), added
-back over the same mesh at `glow`. Last is the scanline mask — one pixel wide,
+`Screen::glow`: `kGlowFloor` is subtracted from the frame first, then two
+halvings through `copy_into()`, each a bilinear filter averaging a 2x2 block,
+which is a box blur for the price of two blits (straight to a quarter would skip
+three pixels in four instead of averaging them), added back over the same mesh
+at `glow`. The floor is what makes it bloom off the lit things rather than off
+everything: a subtract blend over the whole target, clamping at zero on its own,
+which is what stands in for the comparison a shader would do. Without it a dark
+field blooms itself into a gray one — the backdrop's colors are deliberately
+kept under `kGlowFloor` so they contribute nothing. `Screen::take_floor` holds
+the composed blend, or `SDL_BLENDMODE_NONE` and a logged line if the backend has
+no subtract, in which case the glow is the old indiscriminate one. Last is the scanline mask — one pixel wide,
 one row per config-space row, a cosine band rather than a hard row so it does
 not beat against the pixel grid once the curve stretches it — laid over the lit
 picture and curved along with it. It is stretched with the picture rather than

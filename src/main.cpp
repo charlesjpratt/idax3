@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -20,6 +21,31 @@ constexpr double kMaxFrame  = 0.25;        // don't spiral after a stall
 constexpr float     kEdgeWidth = 4.0f; // thickness of the lit bar
 constexpr float     kEdgeTouch = 0.5f; // gap still counted as against the edge
 constexpr SDL_Color kEdgeColor{0xFF, 0xFF, 0xFF, 0xFF};
+
+// The backdrop: overlapping blue circles over the whole window. Laid on a grid
+// so coverage can be guaranteed rather than hoped for, then jittered and
+// oversized until the grid stops reading as one. `kBackSizeMin` is what makes it
+// airtight, and a circle asks more of it than a square did: it has to reach the
+// corners of its cell, which is the sqrt(2), from wherever wandering and turning
+// have taken it, which is the rest.
+constexpr int   kBackMax     = 640;   // tiles the backdrop can hold
+constexpr float kBackCell    = 84.0f; // nominal spacing, in pixels
+constexpr float kBackJitter  = 0.25f; // of a cell, how far one wanders off center
+constexpr float kBackOrbit   = 0.10f; // of a cell, the circle each one walks
+constexpr float kBackSpin    = 0.05f; // revolutions a second around that circle
+// sqrt(2) + 2 * (jitter + orbit), as a diameter in cells.
+constexpr float kBackSizeMin = 2.15f;
+constexpr float kBackSizeMax = 3.4f;
+constexpr int   kDiscSize    = 256;   // the disc texture, in pixels across
+// Every tile is a mix of the deep and one of the two lifts, so the whole field
+// stays near the bottom of its range — dark enough that the pink, the
+// aquamarine and the red all still read as the lit things on it. A few come out
+// purple instead of blue, which is enough to be noticed and not enough to
+// become the color of the backdrop.
+constexpr SDL_Color kBackDeep{0x04, 0x08, 0x16, 0xFF};
+constexpr SDL_Color kBackLift{0x11, 0x20, 0x3E, 0xFF};
+constexpr SDL_Color kBackViolet{0x1C, 0x11, 0x34, 0xFF};
+constexpr float     kBackVioletShare = 0.16f; // of the tiles, on average
 
 // Three small dots centered along the top edge: the hits the ball has left.
 constexpr int   kDotCount   = 3;
@@ -87,7 +113,13 @@ constexpr float kStarRingGap   = 0.5f;  // clear of the ball's rim, per ball rad
 constexpr float kStarRingWidth = 0.16f; // thickness, per ball radius
 constexpr float kStarRingMin   = 2.0f;  // never thinner than this, in pixels
 constexpr float kStarInnerRatio = 0.44f; // waist of the points, per outer radius
-constexpr float kStarTimeout    = 6.0f;  // a crawling ball would never arrive
+// The chase is given the ground there is to cover at the speed there is to
+// cover it, and then some. A flat number cannot do this job: the window size and
+// both speeds are config, so the same seconds are generous in one window and
+// short of the far corner in another — and a chase cut off part way leaves the
+// ball holding a star it never reached.
+constexpr float kStarTripSlack  = 1.6f;  // of the straight-line time
+constexpr float kStarTripMin    = 2.0f;  // seconds, however small the window is
 
 // The eye: a bare pupil on the pink, no white behind it, just a speck of one
 // caught in its right-hand end. It points where the ball is headed, turning at
@@ -127,6 +159,10 @@ constexpr float kSpawnPad = 10.0f; // breathing room between anything spawned
 // sections of config.json; what stays here is how hard they are to hit and how
 // they come apart.
 constexpr int   kHazardMax     = 8;     // moving and still ones together
+// A run that has got this far gets leaned on: both hazards come at a fraction
+// of the gap their config asks for from here on.
+constexpr int   kHazardRampAt  = 10;    // diamonds eaten before the gaps tighten
+constexpr float kHazardRamp    = 0.55f; // of the configured gap, after that
 constexpr float kTriangleHit   = 0.60f; // collision radius, per triangle size
 constexpr float kPairOffset    = 0.50f; // half the gap in a pair, per size: the
                                         // two triangles overlap at this range
@@ -147,6 +183,14 @@ constexpr float kPi    = 3.1415927f;
 constexpr float kTwoPi = 6.2831853f;
 
 enum class Phase { Play, Shake, Burst, FadeOut, Black, FadeIn, StarLook, StarSeek, StarHold };
+
+struct Tile {
+    float x = 0.0f, y = 0.0f; // center, at rest
+    float size = 0.0f;        // diameter, in pixels
+    float orbit = 0.0f;       // radius of the circle it walks, in pixels
+    float phase = 0.0f;       // where on that circle it starts
+    SDL_Color color{};
+};
 
 struct Dot {
     float x = 0.0f;
@@ -214,6 +258,9 @@ struct World {
     bool  flash = false; // is this shake a wall's, and so flashing
     bool  ball_alive = true;
     bool  started = false; // has the player taken hold of the square yet
+    std::array<Tile, kBackMax> back{};
+    int back_count = 0;
+    float drift = 0.0f; // seconds the backdrop has been turning
     std::array<Dot, kDotCount> dots{};
     std::array<Shard, kShardCount> shards{};
 
@@ -266,6 +313,69 @@ float ball_collider(const World& w, const Config& cfg) {
     return ball_radius(w, cfg) * cfg.circle_collider_scale;
 }
 
+// A straight lerp between two colors, alpha and all.
+SDL_Color blend_color(SDL_Color from, SDL_Color to, float t) {
+    const auto channel = [t](Uint8 a, Uint8 b) {
+        return static_cast<Uint8>(std::lround(
+            static_cast<float>(a) + (static_cast<float>(b) - static_cast<float>(a)) * t));
+    };
+    return SDL_Color{channel(from.r, to.r), channel(from.g, to.g),
+                     channel(from.b, to.b), channel(from.a, to.a)};
+}
+
+// Fills the window with overlapping squares. Built once per world rather than
+// per frame, so the pattern holds still while the game runs over it, and comes
+// back different after a reset or a reload.
+void build_backdrop(World& w, const Config& cfg) {
+    // Coarsen the grid until it fits the pool. A window big enough to need this
+    // gets bigger tiles rather than a backdrop with holes in it.
+    float cell = kBackCell;
+    int cols = 1, rows = 1;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        cols = std::max(static_cast<int>(std::ceil(cfg.window_w / cell)), 1);
+        rows = std::max(static_cast<int>(std::ceil(cfg.window_h / cell)), 1);
+        if (cols * rows <= kBackMax) break;
+        cell *= 1.3f;
+    }
+
+    w.back_count = 0;
+    for (int row = 0; row < rows; ++row) {
+        for (int col = 0; col < cols; ++col) {
+            const float size = cell * rand_range(w, kBackSizeMin, kBackSizeMax);
+            const float mid_x = (static_cast<float>(col) + 0.5f) * cell +
+                                rand_range(w, -kBackJitter, kBackJitter) * cell;
+            const float mid_y = (static_cast<float>(row) + 0.5f) * cell +
+                                rand_range(w, -kBackJitter, kBackJitter) * cell;
+
+            // Which way this one leans, and then how far. Both ends are dark,
+            // so the mix can run the whole way without lifting the field.
+            const bool violet = rand_range(w, 0.0f, 1.0f) < kBackVioletShare;
+            const float mix = rand_range(w, 0.0f, 1.0f);
+
+            Tile& t = w.back[static_cast<size_t>(w.back_count++)];
+            t.x = mid_x;
+            t.y = mid_y;
+            t.size = size;
+            t.orbit = cell * kBackOrbit;
+            // Every tile turns at the same rate; only where each one starts
+            // differs, which is what keeps the field from moving as one sheet.
+            t.phase = rand_range(w, 0.0f, kTwoPi);
+            t.color = blend_color(kBackDeep, violet ? kBackViolet : kBackLift, mix);
+        }
+    }
+
+    // Laid down in the order they were built, every circle would sit over the
+    // one up and left of it and the grid would come back as a shingle — one
+    // light source, one direction, the whole field leaning the same way. The
+    // shuffle is only over the draw order, so nothing about the coverage
+    // changes; it is which of two overlapping circles is on top that stops
+    // being a function of where they are.
+    for (int i = w.back_count - 1; i > 0; --i) {
+        const int j = static_cast<int>(next_rand(w) % static_cast<Uint32>(i + 1));
+        std::swap(w.back[static_cast<size_t>(i)], w.back[static_cast<size_t>(j)]);
+    }
+}
+
 World make_world(const Config& cfg) {
     World w;
     w.square_w = cfg.square_w;
@@ -301,6 +411,7 @@ World make_world(const Config& cfg) {
     w.triangle_wait = rand_range(w, cfg.moving_hazard_gap_min, cfg.moving_hazard_gap_max);
     w.still_wait    = rand_range(w, cfg.still_hazard_gap_min, cfg.still_hazard_gap_max);
     w.shard_tint    = cfg.moving_hazard_color;
+    build_backdrop(w, cfg);
     return w;
 }
 
@@ -876,6 +987,17 @@ void spawn_still_triangle(World& w, const Config& cfg) {
 // Flies the triangles across, retires the ones that have left, and reports a
 // touch on the ball — which costs a dot exactly as a moving wall does. The
 // triangle that lands it comes apart on the spot.
+// How long until the next hazard of a kind. Past `kHazardRampAt` diamonds the
+// draw is scaled down, so both kinds come oftener for the rest of the life. It
+// is applied where the wait is picked rather than to the config itself, so the
+// file keeps meaning what it says and an R reload still reports its own numbers;
+// and it reads `World::eaten`, which a reset clears, so every life starts off
+// the pressure again and earns its way back.
+float hazard_gap(World& w, float low, float high) {
+    const float gap = rand_range(w, low, high);
+    return (w.eaten >= kHazardRampAt) ? gap * kHazardRamp : gap;
+}
+
 bool update_triangles(World& w, const Config& cfg, float dt) {
     update_shards(w.tri_shards, cfg, dt);
 
@@ -887,7 +1009,7 @@ bool update_triangles(World& w, const Config& cfg, float dt) {
         w.triangle_wait -= dt;
         if (w.triangle_wait <= 0.0f) {
             w.triangle_wait =
-                rand_range(w, cfg.moving_hazard_gap_min, cfg.moving_hazard_gap_max);
+                hazard_gap(w, cfg.moving_hazard_gap_min, cfg.moving_hazard_gap_max);
             spawn_triangle(w, cfg);
         }
     }
@@ -896,7 +1018,7 @@ bool update_triangles(World& w, const Config& cfg, float dt) {
         w.still_wait -= dt;
         if (w.still_wait <= 0.0f) {
             w.still_wait =
-                rand_range(w, cfg.still_hazard_gap_min, cfg.still_hazard_gap_max);
+                hazard_gap(w, cfg.still_hazard_gap_min, cfg.still_hazard_gap_max);
             spawn_still_triangle(w, cfg);
         }
     }
@@ -1074,6 +1196,7 @@ void age_boost(World& w, float dt) {
 // One phase runs at a time: only Play bounces the ball off the walls, so
 // everything else holds still while a hit or a star plays out.
 void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
+    w.drift += dt; // the backdrop turns through everything, shakes and fades too
     update_dots(w, cfg, dt);
     const float aim_error = update_look(w, cfg, dt);
 
@@ -1187,8 +1310,8 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         update_hexagon(w, cfg, dt);
         grow_square(w, cfg, dt);
         const bool struck = update_triangles(w, cfg, dt);
-        const bool arrived = home_ball(w, cfg, w.star.x, w.star.y,
-                                      cfg.circle_speed * cfg.star_seek_speed, dt);
+        const float chase = cfg.circle_speed * cfg.star_seek_speed;
+        const bool arrived = home_ball(w, cfg, w.star.x, w.star.y, chase, dt);
 
         // Either direction counts: the ball crossing an edge on its way out, or
         // the player driving an edge into it while it is out there. A triangle
@@ -1201,7 +1324,25 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
             break;
         }
 
-        if (arrived || w.timer >= kStarTimeout) {
+        // A straight line to the star is never longer than the window's own
+        // diagonal, so that is the trip to allow for; the slack covers the tick
+        // the last step lands on. At `circle.speed` of 0 there is no arriving at
+        // all, which is what the floor is for.
+        const float across = std::sqrt(
+            static_cast<float>(cfg.window_w) * static_cast<float>(cfg.window_w) +
+            static_cast<float>(cfg.window_h) * static_cast<float>(cfg.window_h));
+        const float allowance = (chase > 0.0f)
+            ? std::max(across / chase * kStarTripSlack, kStarTripMin)
+            : kStarTripMin;
+
+        if (arrived || w.timer >= allowance) {
+            // Only reachable by the floor above, and the hold has to happen at
+            // the star: parked anywhere else it reads as the ball catching
+            // something it never got to.
+            if (!arrived) {
+                w.circle_x = w.star.x;
+                w.circle_y = w.star.y;
+            }
             w.phase = Phase::StarHold;
             w.timer = 0.0f;
         }
@@ -1563,12 +1704,21 @@ constexpr int kTubeRows  = 24;
 constexpr int kTubeVerts = (kTubeCols + 1) * (kTubeRows + 1);
 constexpr int kTubeIndex = kTubeCols * kTubeRows * 6;
 constexpr int kGlowStep  = 2;  // each blur pass halves the picture
+// Bloom comes off the lit things only. Nothing dimmer than this contributes to
+// it, which is what keeps a dark field dark: without a floor the whole frame
+// blooms, the backdrop lifts itself into a gray one, and `glow` stops meaning
+// what it says. The backdrop's own colors are kept under this on purpose.
+constexpr Uint8 kGlowFloor = 0x40;
 
 struct Screen {
     SDL_Texture* frame = nullptr; // the field, drawn at config size
     SDL_Texture* half  = nullptr; // halfway down to the blur
     SDL_Texture* glow  = nullptr; // quarter size, added back for phosphor bloom
     SDL_Texture* lines = nullptr; // 1 x height scanline mask
+    SDL_Texture* disc  = nullptr; // one white circle, tinted per backdrop tile
+    // How the floor is taken off the bloom. NONE if the backend has no
+    // subtract, in which case the glow is the old indiscriminate one.
+    SDL_BlendMode take_floor = SDL_BLENDMODE_NONE;
 };
 
 void free_screen(Screen& s) {
@@ -1576,6 +1726,7 @@ void free_screen(Screen& s) {
     if (s.half)  SDL_DestroyTexture(s.half);
     if (s.glow)  SDL_DestroyTexture(s.glow);
     if (s.lines) SDL_DestroyTexture(s.lines);
+    if (s.disc)  SDL_DestroyTexture(s.disc);
     s = Screen{};
 }
 
@@ -1609,6 +1760,47 @@ void build_screen(Screen& s, SDL_Renderer* renderer, const Config& cfg) {
         SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_ADD);
     }
+
+    // One white disc, tinted and stretched per backdrop tile. Circles that big
+    // drawn a row at a time would be tens of thousands of line calls a frame,
+    // where this is one textured quad each; scaling it up is also what softens
+    // the rim, which a row of spans could not do at all.
+    {
+        std::vector<Uint32> pixels(static_cast<size_t>(kDiscSize) * kDiscSize);
+        const float mid = static_cast<float>(kDiscSize) * 0.5f;
+        for (int y = 0; y < kDiscSize; ++y) {
+            for (int x = 0; x < kDiscSize; ++x) {
+                const float dx = static_cast<float>(x) + 0.5f - mid;
+                const float dy = static_cast<float>(y) + 0.5f - mid;
+                // Coverage across the last pixel, so the edge is not a staircase.
+                const float edge = mid - std::sqrt(dx * dx + dy * dy);
+                const float on = std::clamp(edge + 0.5f, 0.0f, 1.0f);
+                const Uint32 alpha = static_cast<Uint32>(std::lround(on * 255.0f));
+                pixels[static_cast<size_t>(y) * kDiscSize + static_cast<size_t>(x)] =
+                    (alpha << 24) | 0x00FFFFFFu; // white, carried by its alpha
+            }
+        }
+        s.disc = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+                                   SDL_TEXTUREACCESS_STATIC, kDiscSize, kDiscSize);
+        if (s.disc) {
+            SDL_UpdateTexture(s.disc, nullptr, pixels.data(), kDiscSize * sizeof(Uint32));
+            SDL_SetTextureScaleMode(s.disc, SDL_ScaleModeLinear);
+            SDL_SetTextureBlendMode(s.disc, SDL_BLENDMODE_BLEND);
+        }
+    }
+
+    // Subtracting the bloom's floor needs a blend the backend may not have, so
+    // ask once here rather than per frame. dst - src, clamped at zero for free.
+    const SDL_BlendMode take = SDL_ComposeCustomBlendMode(
+        SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_REV_SUBTRACT,
+        SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
+    if (SDL_SetRenderDrawBlendMode(renderer, take) == 0) {
+        s.take_floor = take;
+    } else {
+        SDL_Log("no subtract blend (%s); the glow will lift the whole frame",
+                SDL_GetError());
+    }
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND); // back to the fade's
 
     // The scanline mask: one pixel wide, one row per config-space row, black at
     // whatever alpha the gaps want. It is stretched with the picture rather than
@@ -1739,10 +1931,21 @@ void present_screen(SDL_Renderer* renderer, const Screen& screen, const Config& 
 
     const bool glowing = cfg.crt_enabled && cfg.crt_glow > 0.0f;
     if (glowing) {
+        // Take the floor off before blurring, so only what was already lit is
+        // left to spread. This is what a shader would do with a comparison and
+        // what there is instead of one: a subtract over the whole target, which
+        // clamps at zero on its own, leaving the dark of the frame at nothing.
+        copy_into(renderer, screen.half, screen.frame);
+        if (screen.take_floor != SDL_BLENDMODE_NONE) {
+            SDL_SetRenderDrawBlendMode(renderer, screen.take_floor);
+            SDL_SetRenderDrawColor(renderer, kGlowFloor, kGlowFloor, kGlowFloor, 0);
+            SDL_RenderFillRect(renderer, nullptr);
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        }
+
         // Two halvings: each is a bilinear filter averaging a 2x2 block, which
         // buys a box blur for the price of two blits. Going straight down to a
         // quarter would skip three pixels in four instead of averaging them.
-        copy_into(renderer, screen.half, screen.frame);
         copy_into(renderer, screen.glow, screen.half);
     }
 
@@ -1786,6 +1989,26 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
     SDL_SetRenderTarget(renderer, screen.frame);
     set_draw_color(renderer, cfg.background_color);
     SDL_RenderClear(renderer);
+
+    // The backdrop goes down first, under the whole field. It covers the clear
+    // completely, so `background.color` is what shows through the gaps — and
+    // there are none: each tile is big enough to cover its own cell from
+    // anywhere on the circle it walks, which is what `kBackSizeMin` is for.
+    const float turn = w.drift * kBackSpin * kTwoPi;
+    for (int i = 0; i < w.back_count; ++i) {
+        const Tile& t = w.back[static_cast<size_t>(i)];
+        const float mid_x = t.x + std::cos(turn + t.phase) * t.orbit;
+        const float mid_y = t.y + std::sin(turn + t.phase) * t.orbit;
+        const SDL_FRect tile{mid_x - t.size * 0.5f, mid_y - t.size * 0.5f,
+                             t.size, t.size};
+        if (screen.disc) {
+            SDL_SetTextureColorMod(screen.disc, t.color.r, t.color.g, t.color.b);
+            SDL_RenderCopyF(renderer, screen.disc, nullptr, &tile);
+        } else { // no disc to stretch; the field is still covered, just square
+            set_draw_color(renderer, t.color);
+            SDL_RenderFillRectF(renderer, &tile);
+        }
+    }
 
     const SDL_Rect square{
         static_cast<int>(std::lround(w.square_x)),
