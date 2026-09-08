@@ -154,6 +154,16 @@ the middle of the window by `kOpeningSpread`, so the opening pickups are near
 the centered square rather than a drive away. The band is pulled in rather than
 replaced, which keeps it a subset of the ordinary one — every margin above still
 holds at any window size.
+
+Wherever the band is, the spot has to be clear of the ball: `kDiamondTries`
+placements are drawn looking for one `kDiamondClear` times the collection reach
+away, since a diamond landing inside that reach is eaten on the frame it appears
+and is a pickup the player never got to take. Measuring the clearance in
+collection reaches rather than pixels keeps it honest as the ball grows. The
+last try stands whatever it measured, which is where this parts company with
+`spawn_still_triangle()`: a hazard that cannot find a spot sits the round out,
+but `World::eaten` is what unlocks the hazards and the star, so a skipped
+diamond would stall the run — a crowded window gets a near miss instead.
 Nothing else clears one: a diamond has no lifetime, so the next `diamond_wait`
 only starts running once the ball has eaten the current one. Since the ball
 never leaves the square, a diamond that lands outside it is collected by driving
@@ -327,7 +337,17 @@ and gives it the same rattle. Then the star spins in place around it at
 `star.spin_speed` for `star.hold` seconds — `fill_star()` takes that wound-up
 angle, and `spawn_star()` zeroes it so every star arrives upright. The square is
 still the player's to drive throughout, but the ball no longer has anything to
-do with it. Then the star clears, `launch_ball()`
+do with it. Where the square is when the hold ends decides whether there is a release at
+all. `ball_inside_square()` — the same whole-collider test the crossing rule
+uses, so a ball straddling a wall counts as out — is checked as the star lets
+go, and a ball still outside costs the run: every dot left drops at once and
+`Phase::Shake` follows. Dropping them *before* the shake is what turns the
+ordinary sequence into a death, since the shake bursts the ball whenever it
+finds nothing left to take, so the rattle plays, the whole row arcs off the
+bottom and the burst comes after it. Bringing the square out to meet the ball is
+the price of the chase.
+
+Otherwise the star clears, `launch_ball()`
 picks one of the four diagonals at the same speed — a random *angle* would let
 the ball crawl along a wall, so it releases on the same heading the game opens
 on, with two bits of the LCG choosing the quadrant — and `Play` resumes with

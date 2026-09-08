@@ -7,8 +7,8 @@
     "color": "#000000"
   },
   "square": {
-    "width": 300,
-    "height": 300,
+    "width": 400,
+    "height": 400,
     "speed": 190,
     "acceleration": 650,
     "friction": 4200,
@@ -19,7 +19,7 @@
     "min_size": 10
   },
   "circle": {
-    "diameter": 20,
+    "diameter": 30,
     "speed": 170,
     "color": "#FF1493",
     "start_x": 0.5,

@@ -58,6 +58,9 @@ constexpr float kDiamondHalfH  = 12.0f;
 constexpr int   kOpeningDiamonds = 3;    // how many spawn close in
 constexpr float kOpeningSpread   = 0.3f; // of the usual band, measured from center
 constexpr float kDiamondReach  = 9.0f; // collision radius, between the two halves
+// Kept off the ball, as a multiple of the reach it is collected at.
+constexpr float kDiamondClear  = 6.0f;
+constexpr int   kDiamondTries  = 12;   // placements tried for one that far off
 constexpr float kDiamondGapMin = 4.0f; // wait between one being eaten and the next
 constexpr float kDiamondGapMax = 9.0f;
 
@@ -423,8 +426,26 @@ void spawn_diamond(World& w, const Config& cfg) {
         high_y = mid_y + (high_y - mid_y) * kOpeningSpread;
     }
 
-    w.diamond.x      = rand_range(w, low_x, high_x);
-    w.diamond.y      = rand_range(w, low_y, high_y);
+    // Never under the ball. One that lands inside the collection reach is eaten
+    // on the frame it appears — a pickup the player never got to take — so the
+    // spot has to be a good multiple of that reach away before it counts.
+    const float clear = (ball_collider(w, cfg) + kDiamondReach) * kDiamondClear;
+    float x = 0.0f;
+    float y = 0.0f;
+    for (int attempt = 0; attempt < kDiamondTries; ++attempt) {
+        x = rand_range(w, low_x, high_x);
+        y = rand_range(w, low_y, high_y);
+        const float dx = x - w.circle_x;
+        const float dy = y - w.circle_y;
+        if (dx * dx + dy * dy >= clear * clear) break;
+    }
+
+    // The last try stands whatever it measured. Unlike a hazard, which can sit
+    // the round out, the tally these feed is what unlocks the hazards and the
+    // star, so the field is never left without one — a window too crowded to
+    // place it properly gets a near miss rather than nothing at all.
+    w.diamond.x      = x;
+    w.diamond.y      = y;
     w.diamond.active = true;
 }
 
@@ -1210,10 +1231,27 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
 
         if (w.timer >= cfg.star_hold) {
             w.star.active = false;
+
+            // The chase is a loan, and bringing the square out to meet the ball
+            // is the price of it. Caught out here when the star lets go, every
+            // dot still up drops at once and the ball goes with them. Dropping
+            // them before the shake rather than during it is what turns the
+            // ordinary sequence into this one: `Phase::Shake` bursts the ball
+            // whenever it finds nothing left to take, so the rattle plays, the
+            // whole row arcs off the bottom, and the burst follows.
+            if (!ball_inside_square(w, cfg)) {
+                while (dots_left(w) > 0) drop_next_dot(w);
+                w.phase = Phase::Shake;
+                w.timer = 0.0f;
+                break;
+            }
+
             launch_ball(w, cfg);
             w.phase = Phase::Play;
             w.timer = 0.0f;
-            w.grace = kHitGrace; // the ball may be well outside the square
+            // The ball is wholly inside by the test above, so this is only
+            // covering the wall the player may be driving at the moment of it.
+            w.grace = kHitGrace;
         }
         break;
     }
