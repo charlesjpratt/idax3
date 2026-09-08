@@ -482,7 +482,9 @@ kept under `kGlowFloor` so they contribute nothing. `Screen::take_floor` holds
 the composed blend, or `SDL_BLENDMODE_NONE` and a logged line if the backend has
 no subtract, in which case the glow is the old indiscriminate one. Last is the scanline mask — one pixel wide,
 one row per config-space row, a cosine band rather than a hard row so it does
-not beat against the pixel grid once the curve stretches it — laid over the lit
+not beat against the pixel grid once the curve stretches it, which is also why
+`line_gap` is floored at 2 rather than 1: sampled once a row, a period of one
+puts every sample on the same point of the wave and the lines come out flat — laid over the lit
 picture and curved along with it. It is stretched with the picture rather than
 built per output pixel, so `line_gap` is tuned against the art, not the monitor.
 

@@ -385,9 +385,11 @@ inline Config load_config(std::string* loaded_from = nullptr,
     // Past about a quarter the picture folds in on itself at the corners.
     cfg.crt_curvature = std::clamp(cfg.crt_curvature, 0.0f, 0.25f);
     cfg.crt_scanlines = std::clamp(cfg.crt_scanlines, 0.0f, 1.0f);
-    // A gap under a pixel has no gap in it, and the mask is built a row at a
-    // time, so keep it to something a row can actually hold.
-    cfg.crt_line_gap   = std::clamp(cfg.crt_line_gap, 1.0f, 64.0f);
+    // Two rows is the least that can hold a line and a gap, and the floor has to
+    // say so: the mask is a cosine sampled once a row, so at a period of exactly
+    // one every sample lands on the same point of the wave and the lines come
+    // out flat — a value the file would accept while it quietly did nothing.
+    cfg.crt_line_gap   = std::clamp(cfg.crt_line_gap, 2.0f, 64.0f);
     cfg.crt_vignette   = std::clamp(cfg.crt_vignette, 0.0f, 1.0f);
     // The bloom is laid down at this as an alpha, so a full lift is the most
     // light there is to add.
