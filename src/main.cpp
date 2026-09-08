@@ -35,6 +35,10 @@ constexpr float kShakeTime = 1.4f;
 constexpr float kShakeAmp  = 6.0f;
 constexpr float kShakeRate = 47.0f;
 constexpr float kHitGrace  = 0.75f; // no second hit while the ball gets clear
+// A driven wall flashes the ball between its own color and the square's, for
+// as long as the shake it started runs. It ends where the shake does, at a
+// recovery or at the burst, so it needs no length of its own.
+constexpr float kFlashRate = 24.0f; // swaps per second
 
 // Last dot gone: the ball bursts outward, then the screen cycles black and back.
 constexpr int   kShardCount   = 14;
@@ -50,6 +54,9 @@ constexpr float kFadeInTime   = 1.1f;
 constexpr SDL_Color kDiamondColor{0x3C, 0xC8, 0x64, 0xFF};
 constexpr float kDiamondHalfW  = 8.0f;
 constexpr float kDiamondHalfH  = 12.0f;
+// The opening few land near the middle of the window rather than anywhere in it.
+constexpr int   kOpeningDiamonds = 3;    // how many spawn close in
+constexpr float kOpeningSpread   = 0.3f; // of the usual band, measured from center
 constexpr float kDiamondReach  = 9.0f; // collision radius, between the two halves
 constexpr float kDiamondGapMin = 4.0f; // wait between one being eaten and the next
 constexpr float kDiamondGapMax = 9.0f;
@@ -72,6 +79,10 @@ constexpr float kGrowCeil   = 0.48f; // of the square's shorter side, per radius
 // then lets it go again on a new heading. Its size, color, rate, pause, chase
 // speed and hold all live in the `star` section of config.json; what is left
 // here is the shape of the points and two safety valves.
+// While a star has the ball, it wears one in the star's own color.
+constexpr float kStarRingGap   = 0.5f;  // clear of the ball's rim, per ball radius
+constexpr float kStarRingWidth = 0.16f; // thickness, per ball radius
+constexpr float kStarRingMin   = 2.0f;  // never thinner than this, in pixels
 constexpr float kStarInnerRatio = 0.44f; // waist of the points, per outer radius
 constexpr float kStarTimeout    = 6.0f;  // a crawling ball would never arrive
 
@@ -197,6 +208,7 @@ struct World {
     Phase phase = Phase::FadeIn;
     float timer = 0.0f; // time spent in the current phase
     float grace = 0.0f; // hit immunity left
+    bool  flash = false; // is this shake a wall's, and so flashing
     bool  ball_alive = true;
     bool  started = false; // has the player taken hold of the square yet
     std::array<Dot, kDotCount> dots{};
@@ -394,8 +406,25 @@ void spawn_diamond(World& w, const Config& cfg) {
     const float max_y = static_cast<float>(cfg.window_h) - inset_y;
     if (max_x <= inset_x || max_y <= inset_y) return; // window too small to hold one
 
-    w.diamond.x      = rand_range(w, inset_x, max_x);
-    w.diamond.y      = rand_range(w, inset_y, max_y);
+    float low_x = inset_x, high_x = max_x;
+    float low_y = inset_y, high_y = max_y;
+
+    // The first few land close to the middle. The band is drawn in toward the
+    // center rather than replaced, so every margin worked out above still
+    // holds — the opening band is a subset of the ordinary one, whatever the
+    // window size — and the square starts centered too, which puts these
+    // within the frame's reach instead of across the field from it.
+    if (w.eaten < kOpeningDiamonds) {
+        const float mid_x = static_cast<float>(cfg.window_w) * 0.5f;
+        const float mid_y = static_cast<float>(cfg.window_h) * 0.5f;
+        low_x  = mid_x + (low_x  - mid_x) * kOpeningSpread;
+        high_x = mid_x + (high_x - mid_x) * kOpeningSpread;
+        low_y  = mid_y + (low_y  - mid_y) * kOpeningSpread;
+        high_y = mid_y + (high_y - mid_y) * kOpeningSpread;
+    }
+
+    w.diamond.x      = rand_range(w, low_x, high_x);
+    w.diamond.y      = rand_range(w, low_y, high_y);
     w.diamond.active = true;
 }
 
@@ -1067,9 +1096,14 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         update_hexagon(w, cfg, dt);
         const bool struck = update_triangles(w, cfg, dt);
 
-        // Only a wall that was on the move costs a dot; an idle bounce is free.
-        // A triangle costs one however it is met.
-        if ((struck || (hit && square_moving)) && w.grace <= 0.0f) {
+        // Only a wall that was on the move costs a dot; an idle bounce is free,
+        // and `grace` keeps a held key from eating every dot at once. A triangle
+        // costs one however it is met, window or no window: it bursts on
+        // contact, so unlike a wall it cannot land the same hit twice, and
+        // forgiving it would spend the hazard for nothing.
+        const bool walled = hit && square_moving;
+        if (struck || (walled && w.grace <= 0.0f)) {
+            w.flash = walled; // a wall's shake flashes; a hazard's does not
             w.phase = Phase::Shake;
             w.timer = 0.0f;
             break;
@@ -1102,7 +1136,9 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         grow_square(w, cfg, dt); // a recovery in progress keeps opening out
         const bool struck = update_triangles(w, cfg, dt);
 
-        if ((struck || ball_inside_square(w, cfg) != was_inside) && w.grace <= 0.0f) {
+        const bool crossed = ball_inside_square(w, cfg) != was_inside;
+        if (struck || (crossed && w.grace <= 0.0f)) {
+            w.flash = crossed; // the wall passing through it counts as a wall
             w.phase = Phase::Shake;
             w.timer = 0.0f;
             break;
@@ -1136,7 +1172,9 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         // Either direction counts: the ball crossing an edge on its way out, or
         // the player driving an edge into it while it is out there. A triangle
         // caught mid-chase costs the same dot.
-        if ((struck || ball_inside_square(w, cfg) != was_inside) && w.grace <= 0.0f) {
+        const bool crossed = ball_inside_square(w, cfg) != was_inside;
+        if (struck || (crossed && w.grace <= 0.0f)) {
+            w.flash = crossed; // the wall passing through it counts as a wall
             w.phase = Phase::Shake;
             w.timer = 0.0f;
             break;
@@ -1162,7 +1200,9 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         const bool struck = update_triangles(w, cfg, dt);
         w.star.spin += cfg.star_spin_speed * kTwoPi * dt;
 
-        if ((struck || ball_inside_square(w, cfg) != was_inside) && w.grace <= 0.0f) {
+        const bool crossed = ball_inside_square(w, cfg) != was_inside;
+        if (struck || (crossed && w.grace <= 0.0f)) {
+            w.flash = crossed; // the wall passing through it counts as a wall
             w.phase = Phase::Shake;
             w.timer = 0.0f;
             break;
@@ -1187,6 +1227,7 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
                 w.phase = w.star.active ? Phase::StarSeek : Phase::Play;
                 w.timer = 0.0f;
                 w.grace = kHitGrace;
+                w.flash = false; // recovered
             } else {
                 burst_ball(w, cfg);
                 w.phase = Phase::Burst;
@@ -1274,6 +1315,45 @@ void fill_capsule(SDL_Renderer* renderer, float x0, float y0, float x1, float y1
 // The eye: a bare pupil roaming the ball's top two thirds, drawn straight onto
 // the pink. Everything is a fraction of the radius it is handed, so passing the
 // ball's current radius scales the whole eye with every diamond.
+// A ring, filled a row at a time between two radii — the same span-per-row idea
+// as fill_circle(), and for the same reason: a polyline around the rim facets
+// at anything but a small radius, where this follows the true circle at every
+// row the way the ball itself does. Rows clear of the hole are one span; the
+// rest are two, either side of it.
+void fill_ring(SDL_Renderer* renderer, float cx, float cy, float outer, float inner) {
+    const int span = static_cast<int>(outer);
+    for (int dy = -span; dy <= span; ++dy) {
+        const float row = static_cast<float>(dy);
+        const float out_half = std::sqrt(std::max(outer * outer - row * row, 0.0f));
+        const int y = static_cast<int>(std::lround(cy + row));
+        const int left  = static_cast<int>(std::lround(cx - out_half));
+        const int right = static_cast<int>(std::lround(cx + out_half));
+
+        if (std::fabs(row) >= inner) { // past the hole: the row is solid
+            SDL_RenderDrawLine(renderer, left, y, right, y);
+            continue;
+        }
+        const float in_half = std::sqrt(std::max(inner * inner - row * row, 0.0f));
+        SDL_RenderDrawLine(renderer, left, y,
+                           static_cast<int>(std::lround(cx - in_half)), y);
+        SDL_RenderDrawLine(renderer, static_cast<int>(std::lround(cx + in_half)), y,
+                           right, y);
+    }
+}
+
+// The ball's color this frame. A shake a driven wall started swaps it for the
+// square's own color and back, `kFlashRate` times a second, and runs for the
+// whole of that shake — so it ends when the ball recovers, and at a burst it
+// ends because there is no longer a ball to draw. The square's full-strength
+// color is used, not the faded one an idle frame is drawn in, though a wall
+// being driven is at full strength regardless. `World::timer` is the shake's
+// own clock and starts at zero, so the first frame of the hit is the square's.
+SDL_Color ball_color(const World& w, const Config& cfg) {
+    if (!w.flash) return cfg.circle_color;
+    const int swap = static_cast<int>(w.timer * kFlashRate);
+    return (swap & 1) ? cfg.circle_color : cfg.square_color;
+}
+
 void fill_eye(SDL_Renderer* renderer, const World& w, float cx, float cy, float radius) {
     // The eye rests above center so the lower third or so reads as body. `gaze`
     // carries the rise as well as the reach: at rest on a star the eye slides
@@ -1734,10 +1814,25 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
             offset_x = kShakeAmp * decay * std::sin(w.timer * kShakeRate);
             offset_y = kShakeAmp * decay * std::sin(w.timer * kShakeRate * 1.7f) * 0.6f;
         }
+        set_draw_color(renderer, ball_color(w, cfg));
         fill_circle(renderer, w.circle_x + offset_x, w.circle_y + offset_y,
                     ball_radius(w, cfg));
         fill_eye(renderer, w, w.circle_x + offset_x, w.circle_y + offset_y,
                  ball_radius(w, cfg));
+
+        // Caught: while the star has the ball, the ball wears a ring in the
+        // star's color. Drawn with the ball rather than with the star, so it
+        // takes the same rattle and the star itself still lands on top of it.
+        if (w.phase == Phase::StarHold) {
+            const float radius = ball_radius(w, cfg);
+            const float ring = radius * (1.0f + kStarRingGap);
+            // Thickness rides the ball like everything else about the ring, with
+            // a floor so it is still a ring and not a hairline on a small one.
+            const float half = std::max(radius * kStarRingWidth, kStarRingMin) * 0.5f;
+            set_draw_color(renderer, cfg.star_color);
+            fill_ring(renderer, w.circle_x + offset_x, w.circle_y + offset_y,
+                      ring + half, ring - half);
+        }
         set_draw_color(renderer, cfg.circle_color); // shards follow, still pink
     }
     for (const Shard& s : w.shards) {
@@ -1835,6 +1930,14 @@ Config load_and_report() {
 } // namespace
 
 int main(int, char**) {
+    // Ask Windows for real pixels. SDL declares no DPI awareness unless it is
+    // told to, and an unaware process on a scaled display is handed a window
+    // measured in logical pixels which Windows then stretches to the physical
+    // ones — so every game pixel lands across a fraction over one screen pixel
+    // and the thin work smears: the square's outline, the HUD dots, the scanline
+    // mask. Read by the video driver, so it has to be set before SDL_Init.
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;
@@ -1860,6 +1963,15 @@ int main(int, char**) {
         return 1;
     }
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND); // for the fade
+
+    // Anything but a match here means the frame is being scaled on its way to
+    // the window, which is the first thing worth knowing when it looks soft.
+    int out_w = 0, out_h = 0;
+    SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
+    if (out_w != cfg.window_w || out_h != cfg.window_h) {
+        SDL_Log("asked for %dx%d, drawing to %dx%d: the picture is being scaled",
+                cfg.window_w, cfg.window_h, out_w, out_h);
+    }
 
     // The whole game is laid out against cfg.window_w/h, and it draws into a
     // frame of exactly that size; the tube pass is what fits the frame to the

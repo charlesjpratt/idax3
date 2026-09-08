@@ -78,6 +78,22 @@ moving — during a fade the velocity is merely stale, not real — with one
 exception: `Shake` and `Burst` hold it solid, so the wall that landed a hit
 keeps its weight until the ball has finished reacting to it.
 
+**The flash.** `World::flash` records whether the shake now running was a
+wall's, and `ball_color()` swaps the body between `circle_color` and
+`square_color` `kFlashRate` times a second for as long as it is set. It has no
+length of its own: it is set with the phase change, cleared at the recovery, and
+at a burst it simply stops mattering, since `ball_alive` is false and there is
+no body left to color — so it runs exactly until the ball recovers or explodes.
+`World::timer` doubles as its clock, being the shake's own and starting at zero,
+which puts the square's color on the first frame of the hit.
+
+Only a wall sets it — `square_moving` in `Phase::Play`, the edge crossing in the
+three star phases, both of them the same terms the damage rule uses — so a
+hazard's shake, which is the red one's to own, goes unflashed. The square's
+full-strength color is used, never the one dimmed by `square_alpha`, though a
+wall being driven is at full strength regardless. Only the body takes it: the
+eye, the star ring and the loose shards keep their own colors.
+
 **The hit sequence.** A touch only costs something when the player was pushing
 the square that tick (`move_square()` reports the keys, not its velocity, so a
 wall still coasting after the key is let go is free) and `World::grace` has
@@ -133,6 +149,11 @@ place one at a random point anywhere in the window — inside the square or out,
 but `diamond.edge_margin_x`/`_y` clear of the sides and of the HUD rows top and
 bottom, each margin trimmed at spawn to what a small window can spare —
 and grants the boost when the ball comes within `ball_radius() + kDiamondReach`.
+The first `kOpeningDiamonds` are the exception: their band is drawn in toward
+the middle of the window by `kOpeningSpread`, so the opening pickups are near
+the centered square rather than a drive away. The band is pulled in rather than
+replaced, which keeps it a subset of the ordinary one — every margin above still
+holds at any window size.
 Nothing else clears one: a diamond has no lifetime, so the next `diamond_wait`
 only starts running once the ball has eaten the current one. Since the ball
 never leaves the square, a diamond that lands outside it is collected by driving
@@ -222,6 +243,15 @@ timers *hold* rather than draining while locked — so the first hazard of a kin
 comes a full interval after the qualifying diamond, not the instant it is eaten.
 A reset zeroes the tally, so each life earns its hazards again.
 
+`World::grace` does *not* hold the hazards off, only the walls. A hazard bursts
+on contact, which means it cannot land the same hit twice the way a held key
+against a wall can — that repeat is the whole reason the window exists — and it
+is spent either way, so forgiving one would destroy it for nothing and take
+nothing back for it. The grace check therefore sits on the wall term alone in
+all four phases that damage: `struck || (wall && grace)`, never
+`(struck || wall) && grace`. Coming out of a star is where the older grouping
+showed, the ball released into open field with a fresh window running.
+
 `hazard_lobes()` is what keeps the two honest: it returns the one or two points a
 hazard's triangles actually occupy, and *both* drawing and collision go through
 it, so the shape you see is the shape that hits you. A touch (ball collider plus
@@ -286,7 +316,14 @@ ball is carrying, so a diamond boost cannot make a chase faster. Position and ve
 uses the chase speed while the stored vector keeps the ball's carried magnitude,
 which is what `ball_speed()` reads back next tick and what `launch_ball()`
 releases it with. Arriving switches to `StarHold`: the ball parks
-exactly where the star is and the star spins in place around it at
+exactly where the star is, wearing a ring in `star.color` — `fill_ring()` fills it a
+row at a time between two radii, the same span-per-row idea as `fill_circle()`,
+since a polyline around the rim facets at anything but a small radius; its
+radius is `kStarRingGap` per ball radius and its thickness `kStarRingWidth` of
+the same, floored at `kStarRingMin`, so the whole ring grows with every
+diamond. It is drawn
+with the ball rather than with the star, which is what puts it under the star
+and gives it the same rattle. Then the star spins in place around it at
 `star.spin_speed` for `star.hold` seconds — `fill_star()` takes that wound-up
 angle, and `spawn_star()` zeroes it so every star arrives upright. The square is
 still the player's to drive throughout, but the ball no longer has anything to
@@ -326,6 +363,15 @@ over one `//`.
 **R reloads config.json** at runtime (resizes the window, rebuilds the world,
 which also restores the dots and clears any phase in progress), which is the
 intended way to tune values without a rebuild.
+
+`main()` sets `SDL_HINT_WINDOWS_DPI_AWARENESS` before `SDL_Init`, which is where
+the video driver reads it. SDL declares no awareness on its own, and an unaware
+process on a scaled display is given a window measured in logical pixels that
+Windows then stretches to physical ones — a fractional scale under the game's
+feet, which smears every thin thing it draws. Declaring awareness makes the
+window's pixels the screen's pixels, so the frame lands 1:1. Startup logs a line
+if the renderer's output size does not match the config after all, since a
+scaled picture is the first suspect when it looks soft.
 
 **F toggles fullscreen.** Every position in the game is derived from
 `cfg.window_w`/`window_h`, so fullscreen *scales* the picture instead of

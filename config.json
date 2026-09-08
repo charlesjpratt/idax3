@@ -1,7 +1,7 @@
 {
   "window": {
-    "width": 800,
-    "height": 600
+    "width": 1280,
+    "height": 960
   },
   "background": {
     "color": "#000000"
@@ -16,7 +16,7 @@
     "outline": 3,
     "idle_alpha": 0.5,
     "shrink_rate": 1,
-    "min_size": 30
+    "min_size": 10
   },
   "circle": {
     "diameter": 20,
@@ -74,12 +74,12 @@
   // how the game looks, never where anything is or what it touches. R reloads
   // the file, so these can be tuned with the game running.
   "crt": {
-    "enabled": false,    // false skips the whole pass and shows a flat picture
-    "curvature": 0.03,   // how far the glass bows; 0 is a flat panel, 0.25 a fishbowl
-    "scanlines": 0.1,    // how dark the gaps between the lines go; 0 is none
-    "line_gap": 3,       // game pixels from one scanline to the next
+    "enabled": true,     // false skips the whole pass and shows a flat picture
+    "curvature": 0,      // how far the glass bows; 0 is a flat panel, 0.25 a fishbowl
+    "scanlines": 0.05,   // how dark the gaps between the lines go; 0 is none
+    "line_gap": 1,       // game pixels from one scanline to the next
     "vignette": 0.35,    // how far the corners fall away into the dark
-    "glow": 0.3,         // phosphor bloom off the bright shapes; 1 is the most there is
+    "glow": 1,           // phosphor bloom off the bright shapes; 1 is the most there is
     "aberration": 0.005  // red/blue split, as a fraction of the picture's width
   }
 }
