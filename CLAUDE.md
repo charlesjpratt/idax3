@@ -103,7 +103,10 @@ A hit runs `Play → Shake → Play`: the whole world freezes for `kShakeTime` w
 `render()` offsets the ball by a decaying sine rattle, then `drop_next_dot()`
 knocks the rightmost dot in the top row loose. `update_dots()` runs in *every*
 phase, so that dot keeps arcing off the bottom of the screen while play resumes
-around it — over the top of the field, since the dots are HUD.
+around it — over the top of the field, since the dots are HUD. It carries
+`World::draining` too: a forfeit hands over the whole row a dot at a time rather
+than all at once, and putting that here is what lets the row go on emptying
+itself through a burst and a fade, when nothing else is still running.
 
 A world *opens* on `Phase::FadeIn` — that is the `World::phase` default, so
 startup and an R reload both fade up out of black instead of snapping in, and
@@ -125,16 +128,19 @@ When `drop_next_dot()` takes the last one, the sequence continues
 `ball_alive` and calls `fan_shards()`, which throws a `std::array` of shards out
 on an even fan at staggered speeds and sizes (index-derived, so no RNG) —
 the ball and the triangles each own one such array — unconfined by the square;
-`Burst` ends when the last shard is off screen. The reset happens at the end of
+`Burst` ends when the last shard is off screen — and, if a forfeit is handing
+over the row, not before the last dot has been knocked loose: it can fall on
+into the fade like any other, but the taking of it has to be seen. The reset happens at the end of
 `FadeOut` (`w = make_world(cfg)`), behind full black, so `FadeIn` reveals a game
 already back in its starting state. Phase lengths are the `k*Time` constants at
 the top of the file.
 
 **The shrinking square.** `shrink_square()` takes `square.shrink_rate` pixels
-off `World::square_w`/`square_h` per second, through `resize_square()` — the one
-place the box changes size, which moves the corner by half the difference so the
-walls close in evenly around its own center instead of the box crawling one way.
-A hexagon's recovery goes through the same helper. It is called from `Phase::Play` only, and only once
+off `World::square_w`/`square_h` per second, through `resize_square()` — where
+the shrink and the recovery both change the box's size, moving the corner by
+half the difference so the walls close in evenly around its own center instead
+of the box crawling one way. A hexagon's recovery goes through the same helper;
+the squeeze is the one resize that does not, since it anchors on the ball. It is called from `Phase::Play` only, and only once
 `World::started` is set and while `boost` is spent — which is the whole pause rule: a diamond's speed boost holds
 the walls, and so does every star phase, since none of them run through `Play`.
 The floor is `square.min_size` or the ball's current diameter, whichever is
@@ -143,7 +149,87 @@ config clamps `min_size` between `circle.diameter` and the starting square. Note
 that a closing wall touching the ball costs nothing — the damage rule keys off
 `square_moving`, which is read from the keyboard, not from the shrink.
 
-**The pickup.** `update_diamond()` runs only in `Play` and keeps at most one
+**The squeeze.** Holding space takes hold of the ball. `Phase::Squeeze` walks
+the frame in until it is wrapped around the pink, the ball stops where it is,
+and from there it goes wherever the square goes — `move_square()` drives the
+frame as always and the ball is carried by the same delta. It is one number,
+`World::squeeze`, 0 open and 1 shut, running up while the key is held and back
+down when it is let go; `apply_squeeze()` is the only thing that reads it, and
+it runs two lerps off it — the frame's size from `hold_w`/`hold_h` down to a
+grip on the ball, and the ball's place *inside* the frame to dead center. Both
+ends are recorded once, at the grab, so winding the one number back to zero
+restores exactly the frame it interrupted, down to where the ball sat in it,
+which is the only thing "extends to its normal dimensions" can mean when the
+walls have been closing in all game. It is the one resize that does not go
+through `resize_square()`, because it anchors on the ball rather than on the
+box's own center: the walls come to the ball, which is what makes it read as a
+grab and not as the ball being drawn to the middle. The window clamp moves the
+ball with the frame, so driving a grip into a screen edge carries the ball
+rather than squirting it out of the corner.
+
+The ball does not have to be *in* the frame to be taken. `hold_fx`/`hold_fy` are
+only where it sits in the frame's span, as happily outside `[0, 1]` as in, which
+is what lets a grab be made during `StarSeek`: the frame leaves its ground and
+closes on the ball out at the star, then hands that ground back on the way out,
+since the same two numbers run it both ways. A ball already out of the square is
+already in trouble, so that grab starts with the ball's patience spent —
+`begin_squeeze()` takes the fuse to start at, `squeeze.warn` from a chase and
+nothing from open play — and it shakes from the moment the walls reach it, with
+only `squeeze.crush` to go. Letting go hands the ball back to whatever it was
+taken from: a star still on the field means a chase, the same rule a shake
+recovers by. Because the ball comes back exactly where the frame found it,
+outside the walls if that is where it was, the chase counts no crossing for
+having been interrupted. `StarLook` and `StarHold` are not grabbable — the first
+has the ball sitting in the square anyway, and the second is the star's to
+settle.
+
+Once the walls are wrapped, nothing gives another pixel — not the ball, not the
+frame. What runs from there is the clock: `squeeze_strain()` is 0 until the grip
+has been on for `squeeze.warn`, then goes to 1 over `squeeze.crush`, and the
+only thing that reads it is `render()`, which rattles the ball by it. The shake
+is the whole of the warning, and it runs the other way up from a hit's rattle,
+which starts hard and settles. The strain is scaled by `squeeze` itself, since
+the walls are what the ball is shaking against, so letting go quiets it as they
+open.
+
+Held to the end, the grip does not cost a dot — it costs the run, and it goes
+straight to `Phase::Burst` rather than through `Phase::Shake`: there is no
+rattle left to play, the ball having been shaking for the whole of
+`squeeze.crush` already. The frame keeps its grip through it, which is the one
+place `release_squeeze()` is *not* called — the frame is what did this, and
+letting go at the last moment is exactly what the player did not do, so the ball
+goes off inside a frame still shut on it and only the rebuild behind the fade
+opens it again. The row goes after the ball rather than with it: `World::draining`
+knocks the dots loose one after another, `kDrainFirst` after the burst and
+`kDrainGap` apart, so the lives read as being taken in turn.
+
+A hazard reaching the ball mid-grip is the ordinary hit and goes out by its own
+line, costing the one dot it always costs and springing the frame open so the
+ball has room to react — a ball held still is in no position to dodge one, but
+it is a hit like any other. The clock unwinds as well as winds, so letting go
+part way buys back exactly the time it costs to take hold again and tapping the
+key is not a free hold.
+
+The rest of the field runs on around it. A diamond is still collected — by
+driving the frame onto it, the ball having nothing to do with where it goes any
+more — and it pays out as it always does, but `update_diamond()` reports the
+pickup and the grip puts the clock straight to `squeeze.warn`, so the ball
+starts to give on the spot. Hazards keep coming and keep hurting. Nothing
+confines the ball, nothing shrinks the square, and no star appears, since only
+`Play` spawns those. `squeeze.close`, `squeeze.warn` and `squeeze.crush` are
+config; the grip's own clearance and its rattle are constants.
+
+**The resting frame.** `resting_w()`/`resting_h()` report the size the square
+counts as being: its own, or the one a squeeze will spring back to.
+`resting_frame()` puts that box where the walls will land, around the ball where
+it sat. Three passes ask rather than reading the walls directly —
+`ball_radius()`'s growth ceiling, which *cannot* read the current frame, since a
+squeeze closing the walls in would otherwise take the ball down with them and
+the grip that follows the ball would chase it to nothing; the hexagon's
+recovery; and the two spawns that have to stay off the square. Outside a squeeze every one of them is the square itself, so the
+whole idea costs nothing the rest of the time.
+
+**The pickup.** `update_diamond()` runs wherever the ball is live and keeps at most one
 diamond on the field: it counts `diamond_wait` down, calls `spawn_diamond()` to
 place one at a random point anywhere in the window — inside the square or out,
 but `diamond.edge_margin_x`/`_y` clear of the sides and of the HUD rows top and
@@ -185,8 +271,9 @@ there for the rest of the run, so growth stacks and only a reset
 (`make_world()`) takes it back. Every pass that
 cares about the ball's size (bouncing, drawing, bursting) goes through
 `ball_radius()` rather than reading `circle_diameter` directly, which is also
-where the stack is capped — `kGrowCeil` of the square's shorter side, since a
-ball wider than the square would leave the confine pass nowhere to put it.
+where the stack is capped — `kGrowCeil` of the *resting* square's shorter side,
+since a ball wider than the square would leave the confine pass nowhere to put
+it.
 
 Speed is *stateful* instead: `kBoostSpeed` is scaled into `circle_vx/vy` on
 pickup and divided back out when `World::boost` lapses in `Play`, because the
@@ -241,20 +328,28 @@ spawn timer:
   for `still_hazard.life` before it goes. Solid-and-buzzing versus hollow-and-
   still is the whole tell, so the two states must never look alike. It spawns
   outside the square as well as clear of the ball: inside the frame the ball
-  would have nowhere to dodge to. It comes in one of three sizes, drawn evenly — `triangle.size`, half again, or double — carried on the
+  would have nowhere to dodge to. The square it keeps out of is the *resting*
+  one, so a squeeze does not open back out onto a triangle planted in the room
+  the grip gave up. It comes in one of three sizes, drawn evenly — `triangle.size`, half again, or double — carried on the
   hazard's own `scale`, which `hazard_size()` turns into pixels for drawing, for
   the spawn clearance and for the hit radius, so a bigger one really is harder
   to dodge. It retries a few placements to avoid landing on the ball, which
   would be an unreactable hit, and clear of a star that is already out, the
   same rule from the other side. Tuned by the `still_hazard` section.
 
-Both kinds also get *faster*: `hazard_gap()` is what picks either wait, and past
-`kHazardRampAt` diamonds it scales the draw by `kHazardRamp`, so the rest of the
-life runs at a fraction of the gaps the config asks for. Scaling the draw rather
-than the config is what keeps the file honest — it still means what it says, and
-an R reload still reports its own numbers — and since it reads the same
-`World::eaten` as everything else, a reset takes the pressure off and the run
-earns it back.
+Both kinds also get *faster*, and go on getting faster. `hazard_gap()` is what
+picks either wait, and it scales the draw by `World::pressure` — a clock that
+starts at the `kHazardRampAt` diamond and from then on never stops, closing both
+gaps steadily to `kHazardRampFloor` of what the config asks over
+`kHazardRampTime`. Only the *arming* is a tally; what tightens the gaps is time,
+which is the point: a player who stops eating diamonds used to stop the pressure
+along with them, and waiting the run out is exactly what this is for. The clock
+is advanced inside `update_triangles()` rather than in `step()`, so it runs in
+precisely the phases the hazards do — a shake, a burst or a fade is not time the
+run gets to hold against you. Scaling the draw rather than the config is what
+keeps the file honest — it still means what it says, and an R reload still
+reports its own numbers — and the clock is world state like everything else, so
+a reset takes the pressure off and the run earns it back.
 
 Both gates read `World::eaten`, the same tally the bottom row draws, and both
 timers *hold* rather than draining while locked — so the first hazard of a kind
@@ -286,8 +381,9 @@ whole array anyway.
 **The hexagon.** The square's own pickup, and the only thing that undoes the
 shrink. `update_hexagon()` keeps at most one out, gated on `hexagon.unlock`
 diamonds and spawned by `spawn_hexagon()`, which retries placements until
-`hex_spot_is_clear()` accepts one: clear of the square (so it has to be driven
-to rather than collected where it stands), of the ball, of any diamond or star
+`hex_spot_is_clear()` accepts one: clear of the resting square (so it has to be
+driven to rather than collected where it stands, and a squeeze cannot open out
+onto one), of the ball, of any diamond or star
 on the field, of every hazard — a waiting crossing judged by the *lane* it is
 about to run, since it is still parked off screen — and off the HUD rows. Collection is a rect-to-circle
 test — nearest point on the square to the hexagon's center, against
@@ -296,7 +392,10 @@ Taking it doesn't resize the square, it sets a *target*: `kHexRecovery` of the
 way from the current size back to `square.width`/`height`. `grow_square()` then
 walks the walls out to it at `hexagon.grow_rate`, and while it is doing so the
 shrink holds off, so the two never fight over the same pixels. The target can
-approach the starting size but never pass it.
+approach the starting size but never pass it. The gap it closes is measured off
+the *resting* frame, and `grow_square()` does not run during a squeeze at all,
+so one collected while the walls are shut on the ball counts the ground the
+shrink took rather than the grip, and is paid out once the frame is open again.
 
 **The star.** Rarer than a diamond and not a pickup: it takes the ball off the
 player entirely. Everything about it is config — `star.size`, `star.color`,

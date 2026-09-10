@@ -36,6 +36,15 @@ struct Config {
     float square_shrink_rate = 6.0f;
     float square_min_size    = 90.0f;
 
+    // The grab: holding space closes the frame in around the circle and keeps
+    // it there. `close` is how long the walls take to come all the way in — and
+    // to open back out when the key is let go — `warn` how long the ball takes
+    // it before it starts to give, and `crush` how much longer it lasts after
+    // that before the grip has it.
+    float squeeze_close = 0.25f;
+    float squeeze_warn  = 1.6f;
+    float squeeze_crush = 1.2f;
+
     float     circle_diameter = 48.0f;
     float     circle_speed    = 340.0f; // pixels per second
     SDL_Color circle_color{0xFF, 0x69, 0xB4, 0xFF};
@@ -234,6 +243,7 @@ inline Config load_config(std::string* loaded_from = nullptr,
         const nlohmann::json star       = sub_object(root, "star");
         const nlohmann::json diamond    = sub_object(root, "diamond");
         const nlohmann::json hexagon    = sub_object(root, "hexagon");
+        const nlohmann::json squeeze    = sub_object(root, "squeeze");
         const nlohmann::json moving_hazard = sub_object(root, "moving_hazard");
         const nlohmann::json still_hazard  = sub_object(root, "still_hazard");
         const nlohmann::json crt           = sub_object(root, "crt");
@@ -253,6 +263,10 @@ inline Config load_config(std::string* loaded_from = nullptr,
         cfg.square_idle_alpha  = square.value("idle_alpha",  cfg.square_idle_alpha);
         cfg.square_shrink_rate = square.value("shrink_rate", cfg.square_shrink_rate);
         cfg.square_min_size    = square.value("min_size",    cfg.square_min_size);
+
+        cfg.squeeze_close = squeeze.value("close", cfg.squeeze_close);
+        cfg.squeeze_warn  = squeeze.value("warn",  cfg.squeeze_warn);
+        cfg.squeeze_crush = squeeze.value("crush", cfg.squeeze_crush);
 
         cfg.circle_diameter = circle.value("diameter", cfg.circle_diameter);
         cfg.circle_speed    = circle.value("speed",    cfg.circle_speed);
@@ -337,6 +351,12 @@ inline Config load_config(std::string* loaded_from = nullptr,
     // square it is a floor for.
     cfg.square_min_size = std::clamp(cfg.square_min_size, cfg.circle_diameter,
                                      std::min(cfg.square_w, cfg.square_h));
+    // At zero the frame would snap shut and back open with no travel to read,
+    // and the grab is meant to be something you watch closing.
+    cfg.squeeze_close = std::max(cfg.squeeze_close, 0.02f);
+    cfg.squeeze_warn  = std::max(cfg.squeeze_warn, 0.0f);
+    // Long enough that the shake is a warning rather than an announcement.
+    cfg.squeeze_crush = std::max(cfg.squeeze_crush, 0.1f);
     cfg.circle_speed    = std::max(cfg.circle_speed, 0.0f);
     cfg.circle_start_x  = std::clamp(cfg.circle_start_x, 0.0f, 1.0f);
     cfg.circle_start_y  = std::clamp(cfg.circle_start_y, 0.0f, 1.0f);

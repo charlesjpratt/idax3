@@ -54,6 +54,11 @@ constexpr float kDotSpacing = 26.0f;   // center to center
 constexpr float kDotTop     = 22.0f;   // center's distance from the top edge
 constexpr float kDotPop     = -70.0f;  // upward flick before a dot falls away
 constexpr float kDotGravity = 1100.0f;
+// A forfeit doesn't take the row all at once: the dots are knocked loose one
+// after another, so the lives read as being taken in turn rather than vanishing
+// together.
+constexpr float kDrainFirst = 0.30f; // beat after the burst before the first goes
+constexpr float kDrainGap   = 0.34f; // between one and the next
 
 // A wall catching the ball while the square is moving: everything freezes and
 // the ball rattles, then a dot drops away and play resumes.
@@ -155,14 +160,26 @@ constexpr float kStarTurnMax = 1.9f;
 constexpr float kHexRecovery = 0.5f;
 constexpr float kSpawnPad = 10.0f; // breathing room between anything spawned
 
+// The grab. Holding space walks the frame in until it is wrapped around the
+// ball and holds it there — neither gives another pixel after that; what runs
+// from then on is the clock. How long it takes to close, how long the ball
+// takes it and how long it lasts once it starts to shake are all config.
+constexpr float kSqueezeGap   = 3.0f;  // pixels of frame kept clear around it
+constexpr float kSqueezeShake = 5.0f;  // rattle amplitude as it goes
+constexpr float kSqueezeRate  = 44.0f; // radians a second of that rattle
+
 // Red hazards. Sizes, colors, speeds, rates and unlocks are the two hazard
 // sections of config.json; what stays here is how hard they are to hit and how
 // they come apart.
 constexpr int   kHazardMax     = 8;     // moving and still ones together
-// A run that has got this far gets leaned on: both hazards come at a fraction
-// of the gap their config asks for from here on.
-constexpr int   kHazardRampAt  = 10;    // diamonds eaten before the gaps tighten
-constexpr float kHazardRamp    = 0.55f; // of the configured gap, after that
+// A run that has got going gets leaned on, and goes on being leaned on: the
+// third diamond starts a clock, and from there both hazards come at a gap that
+// tightens with every second that passes. Only the arming is a tally — what
+// closes the gaps is time, so a player who stops eating diamonds no longer
+// stops the pressure along with them.
+constexpr int   kHazardRampAt    = 3;     // diamonds eaten before the gaps start closing
+constexpr float kHazardRampTime  = 75.0f; // seconds to bring them all the way in
+constexpr float kHazardRampFloor = 0.35f; // tightest they ever get, per configured gap
 constexpr float kTriangleHit   = 0.60f; // collision radius, per triangle size
 constexpr float kPairOffset    = 0.50f; // half the gap in a pair, per size: the
                                         // two triangles overlap at this range
@@ -182,7 +199,8 @@ constexpr float kTriShardSpeed = 240.0f;
 constexpr float kPi    = 3.1415927f;
 constexpr float kTwoPi = 6.2831853f;
 
-enum class Phase { Play, Shake, Burst, FadeOut, Black, FadeIn, StarLook, StarSeek, StarHold };
+enum class Phase { Play, Squeeze, Shake, Burst, FadeOut, Black, FadeIn,
+                   StarLook, StarSeek, StarHold };
 
 struct Tile {
     float x = 0.0f, y = 0.0f; // center, at rest
@@ -246,6 +264,14 @@ struct World {
     float square_vx = 0.0f, square_vy = 0.0f;
     float square_alpha = 1.0f; // frame goes see-through when it isn't driven
     float grow_to_w = 0.0f, grow_to_h = 0.0f; // size a hexagon promised, 0 when none
+    // The grab. `squeeze` is how far in it has got, 0 open and 1 shut tight on
+    // the ball. The size to give back and where the ball sat in the frame are
+    // taken once, when the key goes down, so running the one number back to
+    // zero undoes the whole of it — the frame the grab interrupted, exactly.
+    float squeeze = 0.0f;
+    float squeeze_time = 0.0f;            // seconds the player has held it
+    float hold_w = 0.0f, hold_h = 0.0f;   // the size to spring back to
+    float hold_fx = 0.5f, hold_fy = 0.5f; // where the ball sat in the frame
     float circle_x = 0.0f, circle_y = 0.0f;
     float circle_vx = 0.0f, circle_vy = 0.0f;
 
@@ -262,6 +288,8 @@ struct World {
     int back_count = 0;
     float drift = 0.0f; // seconds the backdrop has been turning
     std::array<Dot, kDotCount> dots{};
+    bool  draining = false;   // is the whole row being given up, one at a time
+    float drain_wait = 0.0f;  // until the next one is knocked loose
     std::array<Shard, kShardCount> shards{};
 
     Diamond diamond{};
@@ -278,6 +306,7 @@ struct World {
     float look = 0.0f;         // where the eye points, in radians
     float gaze = 1.0f;         // how far out the pupil sits, 0 = dead center
     int   eaten = 0;           // diamonds collected, the bottom row's tally
+    float pressure = 0.0f;     // seconds the run has been leaning on the player
     float boost = 0.0f;        // seconds of extra speed left
     float grow = 1.0f;         // size multiplier, kept until the next reset
     Uint32 rng = 1u;
@@ -295,14 +324,35 @@ float rand_range(World& w, float low, float high) {
     return low + (high - low) * unit;
 }
 
+// The size the square counts as being: its own, or — while a squeeze has it
+// shut on the ball — the one it will spring back to when the key is let go.
+// Anything measuring the frame the game is really played in asks for this
+// rather than for where the walls happen to be this frame.
+float resting_w(const World& w) { return w.squeeze > 0.0f ? w.hold_w : w.square_w; }
+float resting_h(const World& w) { return w.squeeze > 0.0f ? w.hold_h : w.square_h; }
+
+// That frame as a box on the field: where the walls will be once the grip lets
+// go, which is the size it was taken at laid back around the ball exactly where
+// it sat in it. Spawns that have to stay off the square measure against this,
+// or a squeeze would open out onto whatever landed in the room it gave up.
+SDL_FRect resting_frame(const World& w) {
+    if (w.squeeze <= 0.0f) {
+        return SDL_FRect{w.square_x, w.square_y, w.square_w, w.square_h};
+    }
+    return SDL_FRect{w.circle_x - w.hold_w * w.hold_fx,
+                     w.circle_y - w.hold_h * w.hold_fy, w.hold_w, w.hold_h};
+}
+
 // Diamonds swell the ball by `circle_growth_per_diamond` for the rest of the
 // run, so every pass that cares about its size — bouncing, drawing, bursting —
 // has to ask for the radius
 // rather than assume it. Growth stacks and never lapses, so it is capped at a
 // ball the square can still hold: past that the confine pass would have nowhere
-// left to put it.
+// left to put it. The cap measures the resting frame rather than the current
+// one, or a squeeze closing the walls in would take the ball down with them:
+// the grip holds the ball, it never presses it.
 float ball_radius(const World& w, const Config& cfg) {
-    const float ceiling = kGrowCeil * std::min(w.square_w, w.square_h);
+    const float ceiling = kGrowCeil * std::min(resting_w(w), resting_h(w));
     return std::min(cfg.circle_diameter * 0.5f * w.grow, ceiling);
 }
 
@@ -496,6 +546,18 @@ void drop_next_dot(World& w) {
 
 // Dots keep falling through every phase, so one drops away while play resumes.
 void update_dots(World& w, const Config& cfg, float dt) {
+    // A forfeit empties the row a dot at a time from here. It runs wherever the
+    // falling does — which is everywhere — so the row goes on emptying itself
+    // through the burst and the fade, with nothing else left running.
+    if (w.draining) {
+        w.drain_wait -= dt;
+        if (w.drain_wait <= 0.0f) {
+            drop_next_dot(w);
+            w.drain_wait = kDrainGap;
+            if (dots_left(w) == 0) w.draining = false;
+        }
+    }
+
     for (Dot& d : w.dots) {
         if (!d.falling || d.gone) continue;
         d.vy += kDotGravity * dt;
@@ -561,14 +623,15 @@ void spawn_diamond(World& w, const Config& cfg) {
 }
 
 // Runs the pickup: count down to the next spawn, then wait for the ball to
-// reach the one on the field and hand out the boost.
-void update_diamond(World& w, const Config& cfg, float dt) {
+// reach the one on the field and hand out the boost. Reports the moment one is
+// taken, which is what a squeeze keys its own reckoning off.
+bool update_diamond(World& w, const Config& cfg, float dt) {
     // The opening is just the ball bouncing: nothing spawns until the player
     // first drives the square. The timer holds rather than drains while it
     // waits — like the hazard and star gates — so the first diamond arrives a
     // full gap after that push, not the instant it lands. Nothing can be on
     // the field to collect yet, so there is nothing else to run down here.
-    if (!w.started) return;
+    if (!w.started) return false;
 
     if (!w.diamond.active) {
         w.diamond_wait -= dt;
@@ -576,13 +639,13 @@ void update_diamond(World& w, const Config& cfg, float dt) {
             spawn_diamond(w, cfg);
             w.diamond_wait = rand_range(w, kDiamondGapMin, kDiamondGapMax);
         }
-        return;
+        return false;
     }
 
     const float dx = w.circle_x - w.diamond.x;
     const float dy = w.circle_y - w.diamond.y;
     const float reach = ball_collider(w, cfg) + kDiamondReach;
-    if (dx * dx + dy * dy > reach * reach) return;
+    if (dx * dx + dy * dy > reach * reach) return false;
 
     // Speed rides on the velocity itself, so only scale it up on a fresh boost;
     // a second diamond mid-boost just buys more time. Size has no such problem:
@@ -595,6 +658,7 @@ void update_diamond(World& w, const Config& cfg, float dt) {
     w.grow *= cfg.circle_growth_per_diamond;
     ++w.eaten;
     w.diamond.active = false;
+    return true;
 }
 
 // A hazard measures itself against its own kind's configured size.
@@ -720,8 +784,12 @@ void launch_ball(World& w, const Config& cfg) {
 // hazard on the field, and off the HUD rows top and bottom.
 bool hex_spot_is_clear(const World& w, const Config& cfg, float x, float y) {
     const float margin = cfg.hexagon_size + 6.0f;
-    if (x > w.square_x - margin && x < w.square_x + w.square_w + margin &&
-        y > w.square_y - margin && y < w.square_y + w.square_h + margin) {
+    // Judged against the frame the square springs back to, not a grip closed
+    // around the ball: one placed inside that would be collected for nothing
+    // the moment the walls opened out again.
+    const SDL_FRect frame = resting_frame(w);
+    if (x > frame.x - margin && x < frame.x + frame.w + margin &&
+        y > frame.y - margin && y < frame.y + frame.h + margin) {
         return false;
     }
     if (y < cfg.diamond_edge_margin_y ||
@@ -804,8 +872,12 @@ void update_hexagon(World& w, const Config& cfg, float dt) {
     if (dx * dx + dy * dy > cfg.hexagon_size * cfg.hexagon_size) return;
 
     // Set the target, don't jump to it: grow_square() walks the walls back out.
-    w.grow_to_w = w.square_w + (cfg.square_w - w.square_w) * kHexRecovery;
-    w.grow_to_h = w.square_h + (cfg.square_h - w.square_h) * kHexRecovery;
+    // The ground won back is measured off the resting frame, so one taken while
+    // a squeeze has the walls shut counts the ground the shrink took rather
+    // than the grip — and since grow_square() doesn't run during a squeeze, it
+    // is paid out once the frame is open again.
+    w.grow_to_w = resting_w(w) + (cfg.square_w - resting_w(w)) * kHexRecovery;
+    w.grow_to_h = resting_h(w) + (cfg.square_h - resting_h(w)) * kHexRecovery;
 
     w.hex.active = false;
     w.hex_wait   = rand_range(w, cfg.hexagon_gap_min, cfg.hexagon_gap_max);
@@ -964,9 +1036,12 @@ void spawn_still_triangle(World& w, const Config& cfg) {
             continue;
         }
 
-        // Not in the square, nor close enough to overlap its walls.
-        if (x > w.square_x - size && x < w.square_x + w.square_w + size &&
-            y > w.square_y - size && y < w.square_y + w.square_h + size) {
+        // Not in the square, nor close enough to overlap its walls — and the
+        // square here is the one it springs back to, so a squeeze does not open
+        // out onto a triangle planted in the room it gave up.
+        const SDL_FRect frame = resting_frame(w);
+        if (x > frame.x - size && x < frame.x + frame.w + size &&
+            y > frame.y - size && y < frame.y + frame.h + size) {
             continue;
         }
 
@@ -987,19 +1062,29 @@ void spawn_still_triangle(World& w, const Config& cfg) {
 // Flies the triangles across, retires the ones that have left, and reports a
 // touch on the ball — which costs a dot exactly as a moving wall does. The
 // triangle that lands it comes apart on the spot.
-// How long until the next hazard of a kind. Past `kHazardRampAt` diamonds the
-// draw is scaled down, so both kinds come oftener for the rest of the life. It
-// is applied where the wait is picked rather than to the config itself, so the
-// file keeps meaning what it says and an R reload still reports its own numbers;
-// and it reads `World::eaten`, which a reset clears, so every life starts off
-// the pressure again and earns its way back.
+// How long until the next hazard of a kind. The draw is scaled down by however
+// long the run has been leaning on the player — `World::pressure`, which starts
+// running at the third diamond and does not stop — so both kinds come oftener
+// and oftener from there, down to `kHazardRampFloor` of what the config asks.
+// It is applied where the wait is picked rather than to the config itself, so
+// the file keeps meaning what it says and an R reload still reports its own
+// numbers; and the clock is world state, which a reset clears, so every life
+// starts off the pressure again and earns its way back. At zero pressure the
+// scale is exactly 1, so this is the ordinary gap until the ramp arms itself.
 float hazard_gap(World& w, float low, float high) {
     const float gap = rand_range(w, low, high);
-    return (w.eaten >= kHazardRampAt) ? gap * kHazardRamp : gap;
+    const float lean = std::min(w.pressure / kHazardRampTime, 1.0f);
+    return gap * (1.0f - (1.0f - kHazardRampFloor) * lean);
 }
 
 bool update_triangles(World& w, const Config& cfg, float dt) {
     update_shards(w.tri_shards, cfg, dt);
+
+    // The third diamond starts the run leaning, and this is the clock it leans
+    // by. It is advanced here rather than in step() so it runs in exactly the
+    // phases the hazards themselves do — a shake, a burst or a fade is not time
+    // the run gets to hold against the player.
+    if (w.eaten >= kHazardRampAt) w.pressure += dt;
 
     // Both hazards are earned: neither appears until the tally along the bottom
     // has reached its own threshold, and each timer holds rather than running
@@ -1181,6 +1266,85 @@ void shrink_square(World& w, const Config& cfg, float dt) {
                   std::max(w.square_h - step, floor_size));
 }
 
+// Puts the frame where a squeeze `t` of the way in leaves it: the size runs
+// from what it was held at down to a grip on the ball, and the ball's place
+// inside it runs to dead center. It is anchored on the ball rather than on the
+// box's own center — the walls come to the ball, which is what makes it read as
+// a grab and not as the ball being drawn to the middle — which is why this is
+// the one resize that doesn't go through resize_square(). At `t` of 0 it
+// restores exactly the frame the grab interrupted.
+void apply_squeeze(World& w, const Config& cfg, float t) {
+    // Where the walls stop: just clear of the ball, and there they stay — the
+    // ball keeps its size in here, so the grip has nothing to follow down.
+    // Never wider than what was held, so a grip on a small ball in an
+    // already-tight frame can't push the walls back out.
+    const float grip = (ball_radius(w, cfg) + kSqueezeGap) * 2.0f;
+    const float next_w = w.hold_w + (std::min(grip, w.hold_w) - w.hold_w) * t;
+    const float next_h = w.hold_h + (std::min(grip, w.hold_h) - w.hold_h) * t;
+    const float frac_x = w.hold_fx + (0.5f - w.hold_fx) * t;
+    const float frac_y = w.hold_fy + (0.5f - w.hold_fy) * t;
+
+    w.square_w = next_w;
+    w.square_h = next_h;
+
+    // The ball keeps its place on the field and the frame is laid around it.
+    // Where the window won't let the frame go, the ball is carried the rest of
+    // the way with it, so the two stay locked however hard it is driven at a
+    // side — the frame has hold of it, and a frame stopped dead takes the ball
+    // it is holding with it.
+    const float want_x = w.circle_x - next_w * frac_x;
+    const float want_y = w.circle_y - next_h * frac_y;
+    const float put_x = std::clamp(want_x, 0.0f,
+                                   std::max(static_cast<float>(cfg.window_w) - next_w, 0.0f));
+    const float put_y = std::clamp(want_y, 0.0f,
+                                   std::max(static_cast<float>(cfg.window_h) - next_h, 0.0f));
+    w.circle_x += put_x - want_x;
+    w.circle_y += put_y - want_y;
+    w.square_x = put_x;
+    w.square_y = put_y;
+}
+
+// How near the grip is to taking the ball: 0 until it has been held longer than
+// it can take, then up to 1 over the `squeeze.crush` seconds it spends shaking.
+// Nothing about the size of anything rides on this — it sets how hard the ball
+// rattles, and that is the whole of the warning. Scaled by how closed the frame
+// is, since the walls are what it is shaking against, so letting go quiets it
+// as they open.
+float squeeze_strain(const World& w, const Config& cfg) {
+    const float fuse = std::clamp((w.squeeze_time - cfg.squeeze_warn) / cfg.squeeze_crush,
+                                  0.0f, 1.0f);
+    return fuse * w.squeeze;
+}
+
+// Takes hold. The size to give back and where the ball sits in the frame are
+// recorded now and nothing else is disturbed, so everything the squeeze goes on
+// to do is undone by running it back to zero. `fuse` is how much of the ball's
+// patience is already spent: nothing on an ordinary grab, all of it on a ball
+// snatched out of a chase, which shakes from the moment the walls reach it.
+//
+// The ball need not be inside the frame at all. `hold_fx`/`hold_fy` are just
+// where it sits in the frame's span, outside `[0, 1]` as readily as in, so a
+// grab made while the ball is out at a star has the frame leave its ground and
+// close on the ball where it is — and hands back exactly that ground on the way
+// out, since the same two numbers run the frame both ways.
+void begin_squeeze(World& w, float fuse) {
+    w.hold_w  = w.square_w;
+    w.hold_h  = w.square_h;
+    w.hold_fx = (w.square_w > 0.0f) ? (w.circle_x - w.square_x) / w.square_w : 0.5f;
+    w.hold_fy = (w.square_h > 0.0f) ? (w.circle_y - w.square_y) / w.square_h : 0.5f;
+    w.squeeze = 0.0f;
+    w.squeeze_time = fuse;
+}
+
+// Lets go of it, wherever it had got to. Winding back out is the ordinary way
+// this ends; this is the one way out for the ball, which springs the frame open
+// around it in a single frame — it is about to be rattled about anyway.
+void release_squeeze(World& w, const Config& cfg) {
+    apply_squeeze(w, cfg, 0.0f);
+    w.squeeze = 0.0f;
+    w.squeeze_time = 0.0f;
+}
+
 // Spends the speed boost. The size half of a diamond never lapses, so this only
 // has the velocity to undo.
 void age_boost(World& w, float dt) {
@@ -1204,12 +1368,15 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
     // one that is. Only the phases that actually drive it count as moving —
     // during a shake the velocity is merely stale. It stays solid through a
     // collision, though: the wall that landed the hit holds its weight until
-    // the ball has finished reacting to it.
-    const bool drivable = w.phase == Phase::Play || w.phase == Phase::StarLook ||
+    // the ball has finished reacting to it — and through a squeeze, where a
+    // frame with the ball in its teeth is doing the most work it ever does.
+    const bool drivable = w.phase == Phase::Play || w.phase == Phase::Squeeze ||
+                          w.phase == Phase::StarLook ||
                           w.phase == Phase::StarSeek || w.phase == Phase::StarHold;
-    const bool colliding = w.phase == Phase::Shake || w.phase == Phase::Burst;
+    const bool solid = w.phase == Phase::Shake || w.phase == Phase::Burst ||
+                       w.phase == Phase::Squeeze;
     const bool driven = drivable && (w.square_vx != 0.0f || w.square_vy != 0.0f);
-    const float alpha_target = (colliding || driven) ? 1.0f : cfg.square_idle_alpha;
+    const float alpha_target = (solid || driven) ? 1.0f : cfg.square_idle_alpha;
     const float alpha_step = kSquareFadeRate * dt;
     w.square_alpha += std::clamp(alpha_target - w.square_alpha, -alpha_step, alpha_step);
     if (w.grace > 0.0f) w.grace -= dt;
@@ -1219,6 +1386,16 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
     case Phase::Play: {
         const bool square_moving = move_square(w, cfg, keys, dt);
         if (square_moving) w.started = true; // the run proper begins here
+
+        // Space takes hold of the ball. Like everything else, it waits on the
+        // player having taken the square first, so the opening is still just a
+        // ball bouncing in a full-size frame.
+        if (w.started && keys[SDL_SCANCODE_SPACE]) {
+            begin_squeeze(w, 0.0f);
+            w.phase = Phase::Squeeze;
+            w.timer = 0.0f;
+            break;
+        }
 
         // Only open play closes the walls in: a diamond boost holds them, and
         // so does every star phase, none of which come through here. A hexagon's
@@ -1268,6 +1445,84 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         break;
     }
 
+    case Phase::Squeeze: {
+        // The frame has the ball. It closes while the key is held and opens
+        // back out when it is let go, and the ball goes wherever the frame goes
+        // for as long as it lasts: it doesn't move under its own steam, and
+        // nothing confines it, because there is no gap left to confine it in.
+        // Its velocity is untouched throughout, so letting go puts it back on
+        // the heading it was taken off.
+        const bool gripping = keys[SDL_SCANCODE_SPACE];
+
+        const float was_x = w.square_x;
+        const float was_y = w.square_y;
+        move_square(w, cfg, keys, dt);
+        w.circle_x += w.square_x - was_x; // the ball rides the frame
+        w.circle_y += w.square_y - was_y;
+
+        // Wind the grip on or off before anything measures the ball, so the
+        // whole tick sees one size for it.
+        const float travel = dt / cfg.squeeze_close;
+        w.squeeze = std::clamp(w.squeeze + (gripping ? travel : -travel), 0.0f, 1.0f);
+        apply_squeeze(w, cfg, w.squeeze);
+
+        age_boost(w, dt);
+        const bool ate = update_diamond(w, cfg, dt);
+        update_hexagon(w, cfg, dt);
+        const bool struck = update_triangles(w, cfg, dt);
+
+        // The clock runs with the grip and unwinds with it, so letting go part
+        // way buys back exactly the time it costs to take hold again. A diamond
+        // taken in the grip is what the grab is worth and what it costs at once:
+        // it pays out as it always does, and the ball starts to give on the spot
+        // rather than after the wait.
+        w.squeeze_time = std::max(w.squeeze_time + (gripping ? dt : -dt), 0.0f);
+        if (gripping && ate) w.squeeze_time = std::max(w.squeeze_time, cfg.squeeze_warn);
+
+        // Held to the end is not a hit but the run, and it goes straight to the
+        // burst — there is no rattle to play, since the ball has been shaking
+        // for `squeeze.crush` already. The frame keeps its grip through it: it
+        // is what did this, and letting go at the last moment is exactly what
+        // the player did not do, so the ball goes off inside a frame still shut
+        // on it and only the reset behind the fade opens it. The row is not
+        // taken all at once either — `World::draining` knocks the dots loose one
+        // after another from here, after the ball itself has gone.
+        if (gripping && w.squeeze_time >= cfg.squeeze_warn + cfg.squeeze_crush) {
+            burst_ball(w, cfg);
+            w.flash = false;
+            w.draining = true;
+            w.drain_wait = kDrainFirst;
+            w.phase = Phase::Burst;
+            w.timer = 0.0f;
+            break;
+        }
+
+        // A hazard still reaches the ball in here, and a ball held still is in
+        // no position to dodge one. That one is the ordinary hit and costs the
+        // one dot it always costs, and the frame lets go so the ball has room
+        // to react to it.
+        if (struck) {
+            release_squeeze(w, cfg);
+            w.flash = false; // not a wall's doing, so no flash
+            w.phase = Phase::Shake;
+            w.timer = 0.0f;
+            break;
+        }
+
+        // Let go and wound all the way back out: the frame is the one the grab
+        // interrupted, down to where the ball sits in it — inside or out — and
+        // whatever it was taken from carries on. A star still on the field means
+        // it was a chase, which is the same rule a shake recovers by; and since
+        // the ball is handed back exactly where the frame found it, the chase
+        // does not count a crossing for having been interrupted.
+        if (!gripping && w.squeeze <= 0.0f) {
+            release_squeeze(w, cfg);
+            w.phase = w.star.active ? Phase::StarSeek : Phase::Play;
+            w.timer = 0.0f;
+        }
+        break;
+    }
+
     case Phase::StarLook: {
         // Dead stop while the eye comes around. The square is still the
         // player's, so the same edge-crossing rule as the chase applies.
@@ -1299,6 +1554,18 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
     }
 
     case Phase::StarSeek: {
+        // The frame can take the ball out of a chase as well, and it does not
+        // have to catch up with it first — the grab closes on the ball wherever
+        // it has got to. A ball already out of the square is already in trouble,
+        // though, so this one starts at the end of its patience: it shakes from
+        // the moment the walls reach it and there is only `squeeze.crush` of it.
+        if (keys[SDL_SCANCODE_SPACE]) {
+            begin_squeeze(w, cfg.squeeze_warn);
+            w.phase = Phase::Squeeze;
+            w.timer = 0.0f;
+            break;
+        }
+
         // Out of the square and straight to the star. Nothing confines the ball
         // here, so the wall doesn't stop it — but crossing that wall still costs
         // a dot, the same as a moving wall catching it in Play.
@@ -1417,7 +1684,11 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
 
     case Phase::Burst:
         update_shards(w.tri_shards, cfg, dt);
-        if (!update_shards(w.shards, cfg, dt) || w.timer >= kShardTimeout) {
+        // A forfeit is still handing over the row while the shards fly, so hold
+        // here until the last one has been knocked loose — it can go on falling
+        // into the fade like any other, but the taking of it has to be seen.
+        if ((!update_shards(w.shards, cfg, dt) && !w.draining) ||
+            w.timer >= kShardTimeout) {
             w.phase = Phase::FadeOut;
             w.timer = 0.0f;
         }
@@ -2074,6 +2345,15 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
             const float decay = 1.0f - w.timer / kShakeTime;
             offset_x = kShakeAmp * decay * std::sin(w.timer * kShakeRate);
             offset_y = kShakeAmp * decay * std::sin(w.timer * kShakeRate * 1.7f) * 0.6f;
+        } else if (w.phase == Phase::Squeeze) {
+            // The ball starts to strain against the walls, harder the nearer the
+            // grip comes to taking it, and that is the only warning there is —
+            // nothing else about it changes. It runs the other way up from a
+            // hit's rattle, which starts hard and settles.
+            const float strain = squeeze_strain(w, cfg);
+            offset_x = kSqueezeShake * strain * std::sin(w.squeeze_time * kSqueezeRate);
+            offset_y = kSqueezeShake * strain *
+                       std::sin(w.squeeze_time * kSqueezeRate * 1.7f) * 0.6f;
         }
         set_draw_color(renderer, ball_color(w, cfg));
         fill_circle(renderer, w.circle_x + offset_x, w.circle_y + offset_y,
