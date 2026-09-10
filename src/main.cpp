@@ -177,9 +177,9 @@ constexpr int   kHazardMax     = 8;     // moving and still ones together
 // tightens with every second that passes. Only the arming is a tally — what
 // closes the gaps is time, so a player who stops eating diamonds no longer
 // stops the pressure along with them.
-constexpr int   kHazardRampAt    = 3;     // diamonds eaten before the gaps start closing
-constexpr float kHazardRampTime  = 75.0f; // seconds to bring them all the way in
-constexpr float kHazardRampFloor = 0.35f; // tightest they ever get, per configured gap
+constexpr int   kHazardRampAt    = 3;      // diamonds eaten before the gaps start closing
+constexpr float kHazardRampTime  = 180.0f; // seconds to bring them all the way in
+constexpr float kHazardRampFloor = 0.35f;  // tightest they ever get, per configured gap
 constexpr float kTriangleHit   = 0.60f; // collision radius, per triangle size
 constexpr float kPairOffset    = 0.50f; // half the gap in a pair, per size: the
                                         // two triangles overlap at this range
