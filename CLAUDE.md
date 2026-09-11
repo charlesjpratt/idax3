@@ -38,8 +38,8 @@ lerping `circle_start_x/y` across the square's *interior* span
 (`square_w - circle_diameter`) rather than its full width — the config clamps
 those fractions to `[0, 1]` and forces the square to be at least circle-sized,
 so the placement can never start the ball clipped into a wall. The loop is a fixed 120 Hz accumulator with a 0.25 s frame cap
-and vsync'd presentation; input is read from `SDL_GetKeyboardState` per frame,
-not from events, so held keys work.
+and vsync'd presentation; input is polled per frame rather than read from
+events, so held keys and a held stick both work.
 
 The ball draws and collides on two different circles. `ball_radius()` is what
 you see; `ball_collider()` is that times `circle.collider_scale` (0.95 by
@@ -58,10 +58,40 @@ whichever wall was crossed, so a circle hitting a wall bounces and a wall driven
 into the circle knocks it away. It also *reports* the touch, which is what the
 damage rule keys off.
 
-**Driving the square.** The keys set a direction to accelerate along, not a
+**The input.** `read_input()` polls the keyboard and the pad together once a
+tick and settles them into one `Input`: a push vector and a `grip` flag, so
+nothing downstream knows or cares which it came from. The two *add* rather than
+one winning, so either can drive and holding both is still only a direction.
+The push is capped at length 1, which is the same cap the keyboard's diagonal
+always got — `(1, 1)` comes back out as 0.707 apiece — now covering the stick
+and the two together as well.
+
+The stick's deadzone is cut on the *vector*, a circle around the middle rather
+than a cross through it: cut per axis and a stick held near a diagonal loses
+whichever axis is closer to center, which bends the direction away from the one
+being asked for. What is left of the range is stretched back over a full 0..1,
+or there would be no gentle push at all — the square would jump to a fifth of
+its reach the moment the stick cleared the cut. The grab is on either trigger
+and on all four face buttons, being the one thing the pad does besides steer.
+
+One pad at a time: the first found drives, `SDL_CONTROLLERDEVICEADDED` takes
+over if there is none, and removal is matched on the instance id rather than the
+device index, since `which` means a different thing in each event. The subsystem
+is brought up with `SDL_InitSubSystem()` after the video one and its failure is
+only logged — everything the pad does the keyboard does too, so a machine
+without it gets a game, not a dead start.
+
+**Driving the square.** The push sets a direction to accelerate along, not a
 position: `square.acceleration` builds `World::square_vx`/`vy` up to
 `square.speed` — capped on the *vector*, so a diagonal doesn't outrun a straight
-line — and `square.friction` scrubs it off once the keys are let go, never
+line, and scaled by how far the stick is over, so an eased stick tops out
+proportionally slower while the keyboard, always at full reach, gets exactly the
+cap it always had. Coming *down* to a lower cap is friction's work rather than a
+snap, so easing a stick off reads like letting go; at the keyboard's cap the
+overshoot is a fraction of what friction takes in a tick, so that path lands on
+the old number to the last float. The whole thing is bounded by `square.speed`
+regardless, since a friction set below the acceleration would otherwise let a
+tick gain more than the next gives back and the cap would leak — and `square.friction` scrubs it off once the keys are let go, never
 overshooting into reverse. Friction well above acceleration is what makes it
 read as stopping dead while still having weight. The window edge zeroes the
 velocity on that axis rather than letting the box scrape along at speed, and
@@ -147,7 +177,7 @@ The floor is `square.min_size` or the ball's current diameter, whichever is
 larger, so the circle always fits however much diamonds have grown it; the
 config clamps `min_size` between `circle.diameter` and the starting square. Note
 that a closing wall touching the ball costs nothing — the damage rule keys off
-`square_moving`, which is read from the keyboard, not from the shrink.
+`square_moving`, which is read from the player, not from the shrink.
 
 **The squeeze.** Holding space takes hold of the ball. `Phase::Squeeze` walks
 the frame in until it is wrapped around the pink, the ball stops where it is,
@@ -436,7 +466,7 @@ sooner, since the bar is filled at `dt / recharge`.
 **The star.** Rarer than a diamond and not a pickup: it takes the ball off the
 player entirely. Everything about it is config — `star.size`, `star.color`,
 `star.gap_min`/`gap_max`, `star.edge_margin`, `star.pause`, `star.seek_speed`,
-`star.hold`, `star.spin_speed` and `star.unlock_diamonds` — so
+`star.hold`, `star.linger`, `star.spin_speed` and `star.unlock_diamonds` — so
 the whole effect is tunable with R; only the point geometry
 (`kStarInnerRatio`), the turn bounds and the trip allowance stay in the code. `Play` counts `star_wait` down once `World::eaten` has reached
 `star.unlock_diamonds` — held, not drained, until then, the same as the hazard
@@ -478,17 +508,37 @@ diamond. It is drawn
 with the ball rather than with the star, which is what puts it under the star
 and gives it the same rattle.
 
-The ring is also what a crossing meets. While the star has the ball, a moving
-hazard that reaches the ring breaks on the yellow and the pink inside is
-untouched — a ball parked on a star has no say in where it is, so a hit there
-would be one with nothing to react with. `star_ring()` is the one place the two
-radii are worked out, and drawing and the hazard test both come through it, the
-same discipline `hazard_lobes()` keeps: what a crossing breaks on has to be the
-thing you can see it break on. The guard is the ring's whole *outer* radius
-rather than the band alone, so nothing steps over it between two ticks and finds
-the pink — at the configured speed a crossing spends two or three ticks inside
-that band — and it is floored at the ball's own collider, since a high
-`circle.collider_scale` can put the pink out past its own ring. Then the star spins in place around it at
+The ring is also what a hazard meets, and it outlasts the star: `ball_is_ringed()`
+is true while the star has the ball and for `star.linger` seconds after it is let
+go, counted down by `World::ring` beside `grace`. Anything red that reaches it in
+that time breaks on the yellow and the pink inside is untouched. That has to hold
+while the star has it — a ball parked on a star has no say in where it is, so a
+hit there would be one with nothing to react with — and the seconds afterwards
+are the whole of what the loan is worth, since the star drops the ball back into
+whatever the field has become while it was away. Either kind of hazard breaks on
+it: the ring belongs to the ball, and nothing about it knows or cares which sort
+of red it just met.
+
+`star_ring()` is the one place the two radii are worked out, and drawing and the
+hazard test both come through it, the same discipline `hazard_lobes()` keeps:
+what a hazard breaks on has to be the thing you can see it break on. The guard is
+the ring's whole *outer* radius rather than the band alone, so nothing steps over
+it between two ticks and finds the pink — at the configured speed a crossing
+spends two or three ticks inside that band — and it is floored at the ball's own
+collider, since a high `circle.collider_scale` can put the pink out past its own
+ring.
+
+Its going is announced. `ring_is_shown()` draws it solid until its last
+`kRingBlink` seconds and blinks those away — never while the star still has the
+ball, which has no clock running against it. The blink is the drawing only: the
+ring covers the ball for the whole of `star.linger` either way, the way a thing
+about to lapse still works while it says so. It blinks rather than fading
+because a ring faded to nothing would be at its least visible exactly when
+knowing whether it is still there is worth the most. The window is cut into
+`kRingBlinks` equal pairs of slots rather than sampled against a free-running
+rate, so it opens on a whole beat and closes on a dark one however the two
+constants are set — a rate that did not divide the window would open with a
+flicker and could leave the ring lit at the instant it stopped working. Then the star spins in place around it at
 `star.spin_speed` for `star.hold` seconds — `fill_star()` takes that wound-up
 angle, and `spawn_star()` zeroes it so every star arrives upright. The square is
 still the player's to drive throughout, but the ball no longer has anything to

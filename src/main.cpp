@@ -134,6 +134,12 @@ constexpr float kGrowCeil   = 0.48f; // of the square's shorter side, per radius
 constexpr float kStarRingGap   = 0.5f;  // clear of the ball's rim, per ball radius
 constexpr float kStarRingWidth = 0.16f; // thickness, per ball radius
 constexpr float kStarRingMin   = 2.0f;  // never thinner than this, in pixels
+// It spends its last seconds blinking, so its going is something the player is
+// told about rather than something they find out by being hit. The blink is the
+// drawing only — it covers the ball for the whole of `star.linger` either way,
+// the way a thing about to lapse always still works while it says so.
+constexpr float kRingBlink  = 1.2f; // seconds of blinking before it goes
+constexpr int   kRingBlinks = 4;    // on-and-off pairs fitted into those seconds
 constexpr float kStarInnerRatio = 0.44f; // waist of the points, per outer radius
 // The chase is given the ground there is to cover at the speed there is to
 // cover it, and then some. A flat number cannot do this job: the window size and
@@ -214,6 +220,12 @@ constexpr float kStripHalfWidth = 0.95f; // per hazard size
 constexpr Uint8 kStripAlpha     = 60;
 constexpr int   kTriShardCount = 10;
 constexpr float kTriShardSpeed = 240.0f;
+
+// The pad. A stick rests off center, so anything inside the deadzone is nothing
+// at all; a trigger rests at zero, so its threshold only has to be past a
+// resting twitch.
+constexpr float kStickDead   = 0.22f; // of the stick's full reach
+constexpr float kTriggerPull = 0.30f; // of a trigger's full travel
 
 constexpr float kPi    = 3.1415927f;
 constexpr float kTwoPi = 6.2831853f;
@@ -302,6 +314,7 @@ struct World {
     Phase phase = Phase::FadeIn;
     float timer = 0.0f; // time spent in the current phase
     float grace = 0.0f; // hit immunity left
+    float ring  = 0.0f; // seconds of the star's ring still worn after a release
     bool  flash = false; // is this shake a wall's, and so flashing
     bool  ball_alive = true;
     bool  started = false; // has the player taken hold of the square yet
@@ -382,6 +395,30 @@ float ball_radius(const World& w, const Config& cfg) {
 // what sets the two apart — under 1.0 the pink sinks into a wall on a bounce.
 float ball_collider(const World& w, const Config& cfg) {
     return ball_radius(w, cfg) * cfg.circle_collider_scale;
+}
+
+// Is the ball wearing the star's ring? While the star has it, and for
+// `star.linger` after it is let go — the ring is a loan that outlasts the star,
+// so a ball dropped back into a field of hazards is not dropped into it bare.
+bool ball_is_ringed(const World& w) {
+    return w.phase == Phase::StarHold || w.ring > 0.0f;
+}
+
+// Is the ring drawn this frame? Solid for all but its last `kRingBlink`
+// seconds, then blinking them away — and never blinking while the star still
+// has the ball, which has no clock running against it. `World::ring` counts
+// down, which is the whole of what a blink needs. It ends on a dark beat, so
+// the ring is already gone from the eye by the time it is gone from the world.
+bool ring_is_shown(const World& w) {
+    if (!ball_is_ringed(w)) return false;
+    if (w.phase == Phase::StarHold || w.ring > kRingBlink) return true;
+    // The window is cut into an even number of equal slots rather than sampled
+    // against a free-running rate, so the blink opens on a whole beat and closes
+    // on a dark one however the two constants are set — a rate that did not
+    // divide the window would start with a flicker and could end lit.
+    const float slot = (kRingBlink - w.ring) / kRingBlink *
+                       static_cast<float>(kRingBlinks * 2);
+    return (static_cast<int>(slot) & 1) == 0;
 }
 
 // The ring the star puts around the ball while it has it. Both radii are grown
@@ -1186,13 +1223,18 @@ bool update_triangles(World& w, const Config& cfg, float dt) {
 
         if (!w.ball_alive) continue;
 
-        // While the star has the ball, the ball wears the star's ring — and a
-        // crossing meets the ring, not the ball. It still comes apart, but on
-        // the yellow, and the ball inside is untouched, which it has to be: a
-        // ball parked on a star has no say in where it is. The guard is the
-        // ring's whole outer radius rather than the band alone, so nothing can
-        // step over it between one tick and the next and find the pink.
-        const bool guarded = t.moving && w.phase == Phase::StarHold;
+        // While the ring is up, a hazard meets the ring and not the ball. It
+        // still comes apart, but on the yellow, and the pink inside is
+        // untouched — which it has to be while the star has it, a ball parked
+        // on a star having no say in where it is, and which is the whole of
+        // what the ring is worth in the seconds after. Either kind breaks on
+        // it: the ring is a property of the ball, and nothing about it knows
+        // or cares which sort of red it just met.
+        //
+        // The guard is the ring's whole outer radius rather than the band
+        // alone, so nothing can step over it between one tick and the next and
+        // find the pink.
+        const bool guarded = ball_is_ringed(w);
         float guard = ball_collider(w, cfg);
         if (guarded) {
             float outer = 0.0f, inner = 0.0f;
@@ -1223,38 +1265,111 @@ bool update_triangles(World& w, const Config& cfg, float dt) {
     return struck;
 }
 
-// Drives the square from the keyboard and reports whether the player was
-// pushing it this tick — not whether it happens to be in motion. The damage
-// rule keys off that, so a wall still coasting after the key is let go is free,
-// the way an untouched wall always has been.
+// What the player is asking for this tick, gathered from the keyboard and the
+// pad together and settled into one thing, so nothing downstream has to know
+// which of them it came from. `push` is a direction and a reach in one, never
+// longer than 1 — the keys give its corners, the stick everything in between.
+struct Input {
+    float push_x = 0.0f, push_y = 0.0f;
+    bool  grip = false;
+};
+
+// An axis comes back as a signed 16-bit reach; this is that as a fraction.
+float axis_unit(SDL_GameController* pad, SDL_GameControllerAxis axis) {
+    return static_cast<float>(SDL_GameControllerGetAxis(pad, axis)) / 32767.0f;
+}
+
+// Reads both at once and adds them, so a pad never has to be chosen over the
+// keyboard — either can drive, and holding both is still just a direction.
+Input read_input(SDL_GameController* pad) {
+    Input in;
+
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    if (keys[SDL_SCANCODE_LEFT]  || keys[SDL_SCANCODE_A]) in.push_x -= 1.0f;
+    if (keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D]) in.push_x += 1.0f;
+    if (keys[SDL_SCANCODE_UP]    || keys[SDL_SCANCODE_W]) in.push_y -= 1.0f;
+    if (keys[SDL_SCANCODE_DOWN]  || keys[SDL_SCANCODE_S]) in.push_y += 1.0f;
+    in.grip = keys[SDL_SCANCODE_SPACE] != 0;
+
+    if (pad) {
+        // The stick is read as a vector and cut as one, so the deadzone is a
+        // circle around the middle rather than a cross through it: cut per axis
+        // and a stick held near a diagonal loses whichever axis is closer to
+        // center, which bends the direction away from the one being asked for.
+        const float sx = axis_unit(pad, SDL_CONTROLLER_AXIS_LEFTX);
+        const float sy = axis_unit(pad, SDL_CONTROLLER_AXIS_LEFTY);
+        const float reach = std::sqrt(sx * sx + sy * sy);
+        if (reach > kStickDead) {
+            // What is left of the range is stretched back over a full 0..1, or
+            // the square would jump to a fifth of its push the moment the stick
+            // cleared the deadzone and there would be no gentle push at all.
+            const float live =
+                std::min((reach - kStickDead) / (1.0f - kStickDead), 1.0f);
+            in.push_x += sx / reach * live;
+            in.push_y += sy / reach * live;
+        }
+
+        // Either trigger, or any of the four face buttons: the grab is the one
+        // thing the pad does besides steer, so it is on everything that falls
+        // under a thumb or a finger.
+        if (axis_unit(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT)  > kTriggerPull ||
+            axis_unit(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > kTriggerPull ||
+            SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) ||
+            SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) ||
+            SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) ||
+            SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y)) {
+            in.grip = true;
+        }
+    }
+
+    // Never longer than 1. This is the same cap the keyboard's diagonal always
+    // got — (1, 1) comes back out as the old 0.707 apiece — now doing for the
+    // stick and for the two of them held together as well.
+    const float reach = std::sqrt(in.push_x * in.push_x + in.push_y * in.push_y);
+    if (reach > 1.0f) {
+        in.push_x /= reach;
+        in.push_y /= reach;
+    }
+    return in;
+}
+
+// Drives the square from whatever the player is on and reports whether they
+// were pushing it this tick — not whether it happens to be in motion. The
+// damage rule keys off that, so a wall still coasting after the key is let go
+// is free, the way an untouched wall always has been.
 //
-// The keys set a direction to accelerate along rather than a position; letting
+// The push sets a direction to accelerate along rather than a position; letting
 // go hands the square to friction, which at the configured rate scrubs off a
 // full turn of speed in a fraction of a second.
-bool move_square(World& w, const Config& cfg, const Uint8* keys, float dt) {
-    float push_x = 0.0f, push_y = 0.0f;
-    if (keys[SDL_SCANCODE_LEFT]  || keys[SDL_SCANCODE_A]) push_x -= 1.0f;
-    if (keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D]) push_x += 1.0f;
-    if (keys[SDL_SCANCODE_UP]    || keys[SDL_SCANCODE_W]) push_y -= 1.0f;
-    if (keys[SDL_SCANCODE_DOWN]  || keys[SDL_SCANCODE_S]) push_y += 1.0f;
-
-    const bool pushing = (push_x != 0.0f || push_y != 0.0f);
+bool move_square(World& w, const Config& cfg, const Input& in, float dt) {
+    const float reach = std::sqrt(in.push_x * in.push_x + in.push_y * in.push_y);
+    const bool pushing = reach > 0.0f;
 
     if (pushing) {
-        if (push_x != 0.0f && push_y != 0.0f) { // no free speed on the diagonal
-            const float inv = 0.70710678f;
-            push_x *= inv;
-            push_y *= inv;
-        }
-        w.square_vx += push_x * cfg.square_acceleration * dt;
-        w.square_vy += push_y * cfg.square_acceleration * dt;
+        w.square_vx += in.push_x * cfg.square_acceleration * dt;
+        w.square_vy += in.push_y * cfg.square_acceleration * dt;
 
         // Cap the vector, not each axis, or a diagonal would outrun a straight
-        // line the way the old normalization already avoided.
+        // line. How far the stick is over is a top speed as well as a push, so
+        // a stick eased halfway over tops out halfway — the keyboard is always
+        // at full reach, so for it this is the cap it always had.
+        //
+        // Coming *down* to a lower cap is friction's work rather than a snap.
+        // At the keyboard's cap the overshoot is a fraction of what friction
+        // takes in a tick, so that path lands on exactly the old number; it is
+        // easing a stick off that this is for, which should read like letting
+        // go rather than like hitting something.
+        const float cap = cfg.square_speed * reach;
         const float speed =
             std::sqrt(w.square_vx * w.square_vx + w.square_vy * w.square_vy);
-        if (speed > cfg.square_speed && speed > 0.0f) {
-            const float trim = cfg.square_speed / speed;
+        if (speed > cap && speed > 0.0f) {
+            // Never above the configured top speed whatever happens, since a
+            // friction set below the acceleration would otherwise let a tick
+            // gain more than the next one gives back and the cap would leak.
+            const float shed = cfg.square_friction * dt;
+            const float target =
+                std::min(std::max(speed - shed, cap), cfg.square_speed);
+            const float trim = target / speed;
             w.square_vx *= trim;
             w.square_vy *= trim;
         }
@@ -1422,7 +1537,7 @@ void age_boost(World& w, float dt) {
 
 // One phase runs at a time: only Play bounces the ball off the walls, so
 // everything else holds still while a hit or a star plays out.
-void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
+void step(World& w, const Config& cfg, const Input& in, float dt) {
     w.drift += dt; // the backdrop turns through everything, shakes and fades too
     update_dots(w, cfg, dt);
     const float aim_error = update_look(w, cfg, dt);
@@ -1443,6 +1558,7 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
     const float alpha_step = kSquareFadeRate * dt;
     w.square_alpha += std::clamp(alpha_target - w.square_alpha, -alpha_step, alpha_step);
     if (w.grace > 0.0f) w.grace -= dt;
+    if (w.ring  > 0.0f) w.ring  -= dt;
 
     // The grab's charge fills back only while the frame is not using it, so a
     // long hold is not also a free recharge — the wait is between one grab and
@@ -1462,14 +1578,14 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
 
     switch (w.phase) {
     case Phase::Play: {
-        const bool square_moving = move_square(w, cfg, keys, dt);
+        const bool square_moving = move_square(w, cfg, in, dt);
         if (square_moving) w.started = true; // the run proper begins here
 
         // Space takes hold of the ball. Like everything else, it waits on the
         // player having taken the square first, so the opening is still just a
         // ball bouncing in a full-size frame — and on the charge being full,
         // which is the bar along the top of the window.
-        if (w.started && w.charge >= 1.0f && keys[SDL_SCANCODE_SPACE]) {
+        if (w.started && w.charge >= 1.0f && in.grip) {
             begin_squeeze(w, 0.0f);
             w.phase = Phase::Squeeze;
             w.timer = 0.0f;
@@ -1531,11 +1647,11 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         // nothing confines it, because there is no gap left to confine it in.
         // Its velocity is untouched throughout, so letting go puts it back on
         // the heading it was taken off.
-        const bool gripping = keys[SDL_SCANCODE_SPACE];
+        const bool gripping = in.grip;
 
         const float was_x = w.square_x;
         const float was_y = w.square_y;
-        move_square(w, cfg, keys, dt);
+        move_square(w, cfg, in, dt);
         w.circle_x += w.square_x - was_x; // the ball rides the frame
         w.circle_y += w.square_y - was_y;
 
@@ -1607,7 +1723,7 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         // player's, so the same edge-crossing rule as the chase applies.
         const bool was_inside = ball_inside_square(w, cfg);
 
-        move_square(w, cfg, keys, dt);
+        move_square(w, cfg, in, dt);
         age_boost(w, dt);
         update_diamond(w, cfg, dt);
         update_hexagon(w, cfg, dt);
@@ -1638,7 +1754,7 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         // it has got to. A ball already out of the square is already in trouble,
         // though, so this one starts at the end of its patience: it shakes from
         // the moment the walls reach it and there is only `squeeze.crush` of it.
-        if (w.charge >= 1.0f && keys[SDL_SCANCODE_SPACE]) {
+        if (w.charge >= 1.0f && in.grip) {
             begin_squeeze(w, cfg.squeeze_warn);
             w.phase = Phase::Squeeze;
             w.timer = 0.0f;
@@ -1650,7 +1766,7 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         // a dot, the same as a moving wall catching it in Play.
         const bool was_inside = ball_inside_square(w, cfg);
 
-        move_square(w, cfg, keys, dt);
+        move_square(w, cfg, in, dt);
         age_boost(w, dt);
         update_diamond(w, cfg, dt);
         update_hexagon(w, cfg, dt);
@@ -1700,7 +1816,7 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         // spot for `star.hold`, then lets it go on a fresh diagonal.
         const bool was_inside = ball_inside_square(w, cfg);
 
-        move_square(w, cfg, keys, dt);
+        move_square(w, cfg, in, dt);
         age_boost(w, dt);
         update_diamond(w, cfg, dt);
         update_hexagon(w, cfg, dt);
@@ -1739,6 +1855,10 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
             // The ball is wholly inside by the test above, so this is only
             // covering the wall the player may be driving at the moment of it.
             w.grace = kHitGrace;
+            // The ring goes with it. A ball let go at the star's own moment has
+            // no say in what the field looks like when it lands, so it keeps
+            // its cover for a few seconds of its own.
+            w.ring = cfg.star_linger;
         }
         break;
     }
@@ -2443,9 +2563,12 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
         // Caught: while the star has the ball, the ball wears a ring in the
         // star's color. Drawn with the ball rather than with the star, so it
         // takes the same rattle and the star itself still lands on top of it.
-        if (w.phase == Phase::StarHold) {
-            // Same two radii the crossing test measures against, so the ring a
-            // hazard breaks on is the ring you can see it break on.
+        if (ring_is_shown(w)) {
+            // Same two radii the hazard test measures against, so the ring a
+            // hazard breaks on is the ring you can see it break on. Always at
+            // full strength — it blinks out rather than fading, since a ring
+            // faded to nothing would be at its least visible exactly when
+            // knowing whether it is still there is worth the most.
             float outer = 0.0f, inner = 0.0f;
             star_ring(w, cfg, &outer, &inner);
             set_draw_color(renderer, cfg.star_color);
@@ -2584,6 +2707,26 @@ int main(int, char**) {
         return 1;
     }
 
+    // The pad comes up on its own, and its failing is not the game's problem:
+    // everything it does the keyboard does too, so a machine that cannot bring
+    // the subsystem up gets a logged line and a game, not a dead start.
+    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+        SDL_Log("no controller support: %s", SDL_GetError());
+    }
+
+    // One pad at a time: the first one found drives, and if it is unplugged the
+    // next one to arrive takes over. Nothing here is two-player, so there is
+    // nothing to be had from tracking more than the one.
+    SDL_GameController* pad = nullptr;
+    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+        if (!SDL_IsGameController(i)) continue;
+        pad = SDL_GameControllerOpen(i);
+        if (pad) {
+            SDL_Log("controller: %s", SDL_GameControllerName(pad));
+            break;
+        }
+    }
+
     Config cfg = load_and_report();
 
     SDL_Window* window = SDL_CreateWindow(
@@ -2633,6 +2776,19 @@ int main(int, char**) {
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 running = false;
+            } else if (event.type == SDL_CONTROLLERDEVICEADDED) {
+                if (!pad) {
+                    pad = SDL_GameControllerOpen(event.cdevice.which);
+                    if (pad) SDL_Log("controller: %s", SDL_GameControllerName(pad));
+                }
+            } else if (event.type == SDL_CONTROLLERDEVICEREMOVED) {
+                // `which` is an instance id on removal and a device index on
+                // arrival, which is why the two are matched differently.
+                if (pad && event.cdevice.which ==
+                               SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad))) {
+                    SDL_GameControllerClose(pad);
+                    pad = nullptr;
+                }
             } else if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
                 if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
                     running = false;
@@ -2667,9 +2823,9 @@ int main(int, char**) {
         previous = now;
         accumulator += std::min(frame, kMaxFrame);
 
-        const Uint8* keys = SDL_GetKeyboardState(nullptr);
+        const Input in = read_input(pad);
         while (accumulator >= kFixedStep) {
-            step(world, cfg, keys, static_cast<float>(kFixedStep));
+            step(world, cfg, in, static_cast<float>(kFixedStep));
             accumulator -= kFixedStep;
         }
 
@@ -2677,6 +2833,7 @@ int main(int, char**) {
     }
 
     free_screen(screen);
+    if (pad) SDL_GameControllerClose(pad);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();

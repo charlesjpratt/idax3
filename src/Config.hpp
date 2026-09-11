@@ -44,8 +44,8 @@ struct Config {
     // the next — the bar along the top of the window — which only fills once
     // the frame has let go, so a long hold is not also a free recharge.
     float squeeze_close = 0.25f;
-    float squeeze_warn  = 1.6f;
-    float squeeze_crush = 1.2f;
+    float squeeze_warn  = 2.4f;
+    float squeeze_crush = 1.8f;
     float squeeze_recharge = 6.0f;
     // And every fill makes the next one dearer, as a multiplier on the last:
     // 1.0 is a grab that costs the same all run, 1.35 is a third again each
@@ -90,6 +90,9 @@ struct Config {
     // not make the chase faster.
     float star_seek_speed = 0.9f;
     float star_hold       = 3.0f;   // seconds the ball is held at the star
+    // The ring the ball wears at the star stays on it this long after the
+    // release, and anything red that reaches it in that time breaks on it.
+    float star_linger     = 3.0f;
     float star_spin_speed = 1.0f;   // revolutions per second during that hold
     // Stars hold off until this many diamonds have been eaten, the same way the
     // hazards do. 0 means they are out from the first tick.
@@ -299,6 +302,7 @@ inline Config load_config(std::string* loaded_from = nullptr,
         cfg.star_pause      = star.value("pause",      cfg.star_pause);
         cfg.star_seek_speed = star.value("seek_speed", cfg.star_seek_speed);
         cfg.star_hold       = star.value("hold",       cfg.star_hold);
+        cfg.star_linger     = star.value("linger",     cfg.star_linger);
         cfg.star_spin_speed = star.value("spin_speed", cfg.star_spin_speed);
         cfg.star_unlock_diamonds =
             star.value("unlock_diamonds", cfg.star_unlock_diamonds);
@@ -393,6 +397,7 @@ inline Config load_config(std::string* loaded_from = nullptr,
     // At zero the ball would never cover the ground to the star, so keep a floor.
     cfg.star_seek_speed = std::clamp(cfg.star_seek_speed, 0.05f, 4.0f);
     cfg.star_hold       = std::max(cfg.star_hold, 0.0f);
+    cfg.star_linger     = std::max(cfg.star_linger, 0.0f); // 0 drops it at the release
     cfg.star_unlock_diamonds = std::max(cfg.star_unlock_diamonds, 0);
     cfg.diamond_edge_margin_x = std::max(cfg.diamond_edge_margin_x, 0.0f);
     cfg.diamond_edge_margin_y = std::max(cfg.diamond_edge_margin_y, 0.0f);

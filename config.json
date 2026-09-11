@@ -18,13 +18,13 @@
     "shrink_rate": 1,
     "min_size": 10
   },
-  // Holding space closes the frame in around the ball and keeps it there. The
-  // ball stops where it is and rides the frame; hold on too long and the grip
-  // costs the same hit a hazard does.
+  // Space, either trigger or any face button closes the frame in around the
+  // ball and keeps it there. The ball stops where it is and rides the frame;
+  // hold on too long and the grip takes the whole run, not just a hit.
   "squeeze": {
     "close": 0.25,  // seconds for the walls to come all the way in, and to open back out
-    "warn": 1.6,    // seconds the ball takes it before it starts to shake
-    "crush": 1.2,     // seconds of shaking after that before the grip has it
+    "warn": 2.4,    // seconds the ball takes it before it starts to shake
+    "crush": 1.8,   // seconds of shaking after that before the grip has it
     "recharge": 6,          // seconds the bar takes to fill before it can grab again
     "recharge_growth": 1.8, // how much dearer each fill makes the next; 1.0 never changes
     "bar_width": 160        // how wide the bar is drawn, centered along the top
@@ -47,6 +47,7 @@
     "pause": 0.6,
     "seek_speed": 0.8,
     "hold": 3,
+    "linger": 3,       // seconds the ring stays on after the release, breaking hazards
     "spin_speed": 1.0,
     "unlock_diamonds": 3
   },
