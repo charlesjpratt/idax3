@@ -47,11 +47,28 @@ constexpr SDL_Color kBackLift{0x11, 0x20, 0x3E, 0xFF};
 constexpr SDL_Color kBackViolet{0x1C, 0x11, 0x34, 0xFF};
 constexpr float     kBackVioletShare = 0.16f; // of the tiles, on average
 
-// Three small dots centered along the top edge: the hits the ball has left.
+// Three dots centered along the top of the window: the hits the ball has left.
+// They sit low enough to leave the charge bar the room above them.
 constexpr int   kDotCount   = 3;
-constexpr float kDotRadius  = 5.25f;
-constexpr float kDotSpacing = 26.0f;   // center to center
-constexpr float kDotTop     = 22.0f;   // center's distance from the top edge
+constexpr float kDotRadius  = 7.5f;
+constexpr float kDotSpacing = 36.0f;   // center to center
+constexpr float kDotTop     = 58.0f;   // center's distance from the top edge
+
+// The grab's charge, drawn as a bar over the lives and in the square's own
+// color, since it is the square's to spend. Taking hold empties it and it fills
+// again only once the frame has let go, so a bar short of full is a frame that
+// cannot take hold at all. How wide it is and how long the filling takes are
+// both config — `squeeze.bar_width` and `squeeze.recharge`.
+constexpr float kBarHeight = 14.0f;
+constexpr float kBarTop    = 20.0f; // top edge's distance from the top of the window
+// The ground the charge is drawn on, so an empty bar is still a bar. Dark
+// enough to sit under `kGlowFloor` and so bloom no more than the backdrop does
+// — the charge over it is the lit thing, and an empty bar should not glow.
+constexpr SDL_Color kBarTrack{0x3C, 0x3C, 0x3C, 0xFF};
+// Every fill the bar has done makes the next one longer, so the longest one is
+// worth a ceiling: past this the bar has stopped being a wait and become a
+// wall, and a steep `squeeze.recharge_growth` would run away from the run.
+constexpr float kRechargeCeil = 45.0f; // seconds, the most a fill can ever take
 constexpr float kDotPop     = -70.0f;  // upward flick before a dot falls away
 constexpr float kDotGravity = 1100.0f;
 // A forfeit doesn't take the row all at once: the dots are knocked loose one
@@ -97,9 +114,9 @@ constexpr float kDiamondGapMax = 9.0f;
 
 // The tally along the bottom: one small diamond per one eaten, the row growing
 // out from the middle of the screen.
-constexpr float kScoreScale   = 0.60f; // of a field diamond
-constexpr float kScoreSpacing = 18.0f; // center to center
-constexpr float kScoreBottom  = 22.0f; // center's distance from the bottom edge
+constexpr float kScoreScale   = 0.85f; // of a field diamond
+constexpr float kScoreSpacing = 25.0f; // center to center
+constexpr float kScoreBottom  = 28.0f; // center's distance from the bottom edge
 
 
 // What eating one is worth: the speed wears off, the size stays. How much size
@@ -155,8 +172,10 @@ constexpr float kSquareFadeRate = 6.0f; // how fast the frame firms up and dims
 constexpr float kStarTurnMin = 0.15f;
 constexpr float kStarTurnMax = 1.9f;
 
-// A hexagon wins back this much of the ground the square has lost: half the gap
-// between where it has shrunk to and where it started.
+// A hexagon wins back this much of whatever the run has taken: half the gap
+// between where a thing has got to and where it started. It settles the square's
+// size and the grab's recharge by the same line, which is what makes the hexagon
+// the answer to both of the run's ratchets rather than only the one.
 constexpr float kHexRecovery = 0.5f;
 constexpr float kSpawnPad = 10.0f; // breathing room between anything spawned
 
@@ -270,6 +289,8 @@ struct World {
     // zero undoes the whole of it — the frame the grab interrupted, exactly.
     float squeeze = 0.0f;
     float squeeze_time = 0.0f;            // seconds the player has held it
+    float charge = 1.0f;                  // 1 = the frame can take hold, 0 = just did
+    float recharge = 1.0f;                // seconds the next fill takes; seeded from config
     float hold_w = 0.0f, hold_h = 0.0f;   // the size to spring back to
     float hold_fx = 0.5f, hold_fy = 0.5f; // where the ball sat in the frame
     float circle_x = 0.0f, circle_y = 0.0f;
@@ -363,6 +384,21 @@ float ball_collider(const World& w, const Config& cfg) {
     return ball_radius(w, cfg) * cfg.circle_collider_scale;
 }
 
+// The ring the star puts around the ball while it has it. Both radii are grown
+// off the ball, so the whole thing scales with every diamond, and the thickness
+// has a floor so it stays a ring rather than a hairline on a small one.
+//
+// Drawing and the hazard test both come through here, for the same reason
+// hazard_lobes() exists: what a crossing breaks on has to be the thing you can
+// see it break on.
+void star_ring(const World& w, const Config& cfg, float* outer, float* inner) {
+    const float radius = ball_radius(w, cfg);
+    const float mid  = radius * (1.0f + kStarRingGap);
+    const float half = std::max(radius * kStarRingWidth, kStarRingMin) * 0.5f;
+    *outer = mid + half;
+    *inner = mid - half;
+}
+
 // A straight lerp between two colors, alpha and all.
 SDL_Color blend_color(SDL_Color from, SDL_Color to, float t) {
     const auto channel = [t](Uint8 a, Uint8 b) {
@@ -453,6 +489,8 @@ World make_world(const Config& cfg) {
     for (int i = 0; i < kDotCount; ++i) {
         w.dots[i].x = first + kDotSpacing * static_cast<float>(i);
     }
+
+    w.recharge = cfg.squeeze_recharge; // the first fill costs what the file says
 
     w.rng = SDL_GetTicks() * 2654435761u + 1u; // don't replay the same spawns
     w.diamond_wait = rand_range(w, kDiamondGapMin, kDiamondGapMax);
@@ -879,6 +917,12 @@ void update_hexagon(World& w, const Config& cfg, float dt) {
     w.grow_to_w = resting_w(w) + (cfg.square_w - resting_w(w)) * kHexRecovery;
     w.grow_to_h = resting_h(w) + (cfg.square_h - resting_h(w)) * kHexRecovery;
 
+    // The grab is won back on exactly the same terms as the ground, and by the
+    // same line: half the gap between what a fill costs now and what the first
+    // one cost. The run has two ratchets on it — the walls closing and the bar
+    // getting dearer — and the hexagon is the one answer to both.
+    w.recharge += (cfg.squeeze_recharge - w.recharge) * kHexRecovery;
+
     w.hex.active = false;
     w.hex_wait   = rand_range(w, cfg.hexagon_gap_min, cfg.hexagon_gap_max);
 }
@@ -1142,8 +1186,26 @@ bool update_triangles(World& w, const Config& cfg, float dt) {
 
         if (!w.ball_alive) continue;
 
+        // While the star has the ball, the ball wears the star's ring — and a
+        // crossing meets the ring, not the ball. It still comes apart, but on
+        // the yellow, and the ball inside is untouched, which it has to be: a
+        // ball parked on a star has no say in where it is. The guard is the
+        // ring's whole outer radius rather than the band alone, so nothing can
+        // step over it between one tick and the next and find the pink.
+        const bool guarded = t.moving && w.phase == Phase::StarHold;
+        float guard = ball_collider(w, cfg);
+        if (guarded) {
+            float outer = 0.0f, inner = 0.0f;
+            star_ring(w, cfg, &outer, &inner);
+            // Never tighter than the ball it is covering: a high
+            // circle.collider_scale can put the pink out past its own ring, and
+            // a guard inside that would burst the crossing later than the ball
+            // would have felt it.
+            guard = std::max(outer, guard);
+        }
+
         // Bigger triangles reach further, so the test is per hazard.
-        const float reach = ball_collider(w, cfg) + hazard_size(t, cfg) * kTriangleHit;
+        const float reach = guard + hazard_size(t, cfg) * kTriangleHit;
         float xs[2], ys[2];
         const int lobes = hazard_lobes(t, cfg, xs, ys);
         for (int i = 0; i < lobes; ++i) {
@@ -1154,7 +1216,7 @@ bool update_triangles(World& w, const Config& cfg, float dt) {
             fan_shards(w.tri_shards, t.x, t.y, hazard_size(t, cfg) * 0.5f, kTriShardSpeed);
             w.shard_tint = hazard_color(t, cfg);
             t.active = false;
-            struck = true;
+            if (!guarded) struck = true; // the ring took it instead
             break;
         }
     }
@@ -1334,6 +1396,7 @@ void begin_squeeze(World& w, float fuse) {
     w.hold_fy = (w.square_h > 0.0f) ? (w.circle_y - w.square_y) / w.square_h : 0.5f;
     w.squeeze = 0.0f;
     w.squeeze_time = fuse;
+    w.charge = 0.0f; // spent, and no second grab until it has filled again
 }
 
 // Lets go of it, wherever it had got to. Winding back out is the ordinary way
@@ -1380,6 +1443,21 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
     const float alpha_step = kSquareFadeRate * dt;
     w.square_alpha += std::clamp(alpha_target - w.square_alpha, -alpha_step, alpha_step);
     if (w.grace > 0.0f) w.grace -= dt;
+
+    // The grab's charge fills back only while the frame is not using it, so a
+    // long hold is not also a free recharge — the wait is between one grab and
+    // the next, not something a held key can run down behind the scenes. Every
+    // fill that lands makes the next one dearer, so `World::recharge` is carried
+    // as the duration itself rather than worked out from a tally: a hexagon
+    // settles it back part of the way, and half of a gap is not a whole number
+    // of fills.
+    if (w.phase != Phase::Squeeze && w.charge < 1.0f) {
+        w.charge = std::min(w.charge + dt / std::max(w.recharge, 0.0001f), 1.0f);
+        if (w.charge >= 1.0f) {
+            w.recharge = std::min(w.recharge * cfg.squeeze_recharge_growth, kRechargeCeil);
+        }
+    }
+
     w.timer += dt;
 
     switch (w.phase) {
@@ -1389,8 +1467,9 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
 
         // Space takes hold of the ball. Like everything else, it waits on the
         // player having taken the square first, so the opening is still just a
-        // ball bouncing in a full-size frame.
-        if (w.started && keys[SDL_SCANCODE_SPACE]) {
+        // ball bouncing in a full-size frame — and on the charge being full,
+        // which is the bar along the top of the window.
+        if (w.started && w.charge >= 1.0f && keys[SDL_SCANCODE_SPACE]) {
             begin_squeeze(w, 0.0f);
             w.phase = Phase::Squeeze;
             w.timer = 0.0f;
@@ -1559,7 +1638,7 @@ void step(World& w, const Config& cfg, const Uint8* keys, float dt) {
         // it has got to. A ball already out of the square is already in trouble,
         // though, so this one starts at the end of its patience: it shakes from
         // the moment the walls reach it and there is only `squeeze.crush` of it.
-        if (keys[SDL_SCANCODE_SPACE]) {
+        if (w.charge >= 1.0f && keys[SDL_SCANCODE_SPACE]) {
             begin_squeeze(w, cfg.squeeze_warn);
             w.phase = Phase::Squeeze;
             w.timer = 0.0f;
@@ -2365,14 +2444,13 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
         // star's color. Drawn with the ball rather than with the star, so it
         // takes the same rattle and the star itself still lands on top of it.
         if (w.phase == Phase::StarHold) {
-            const float radius = ball_radius(w, cfg);
-            const float ring = radius * (1.0f + kStarRingGap);
-            // Thickness rides the ball like everything else about the ring, with
-            // a floor so it is still a ring and not a hairline on a small one.
-            const float half = std::max(radius * kStarRingWidth, kStarRingMin) * 0.5f;
+            // Same two radii the crossing test measures against, so the ring a
+            // hazard breaks on is the ring you can see it break on.
+            float outer = 0.0f, inner = 0.0f;
+            star_ring(w, cfg, &outer, &inner);
             set_draw_color(renderer, cfg.star_color);
             fill_ring(renderer, w.circle_x + offset_x, w.circle_y + offset_y,
-                      ring + half, ring - half);
+                      outer, inner);
         }
         set_draw_color(renderer, cfg.circle_color); // shards follow, still pink
     }
@@ -2427,9 +2505,31 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
                   cfg.star_size * kStarInnerRatio, w.star.spin);
     }
 
-    // HUD: the hits left along the top and the diamonds eaten along the bottom.
-    // Drawn last of the field so nothing — square, ball, hazard or star — can
-    // cover them; only the fade goes over.
+    // HUD: the grab's charge and the hits left along the top, the diamonds eaten
+    // along the bottom. Drawn last of the field so nothing — square, ball,
+    // hazard or star — can cover them; only the fade goes over.
+
+    // The charge bar: a dark gray track with the charge laid over it in the
+    // square's own color, since it is the square's to spend. It fills both ways
+    // from the middle, the way the tally along the bottom grows, so the two HUD
+    // rows read as one family. Full means the frame can take hold of the ball.
+    const float bar_x =
+        static_cast<float>(cfg.window_w) * 0.5f - cfg.squeeze_bar_width * 0.5f;
+    const SDL_Rect track{
+        static_cast<int>(std::lround(bar_x)), static_cast<int>(std::lround(kBarTop)),
+        static_cast<int>(std::lround(cfg.squeeze_bar_width)),
+        static_cast<int>(std::lround(kBarHeight)),
+    };
+    set_draw_color(renderer, kBarTrack);
+    SDL_RenderFillRect(renderer, &track);
+
+    const int filled = static_cast<int>(std::lround(static_cast<float>(track.w) * w.charge));
+    if (filled > 0) {
+        const SDL_Rect charged{track.x + (track.w - filled) / 2, track.y, filled, track.h};
+        set_draw_color(renderer, cfg.square_color);
+        SDL_RenderFillRect(renderer, &charged);
+    }
+
     set_draw_color(renderer, cfg.circle_color); // the dots match the ball
     for (const Dot& d : w.dots) {
         if (!d.gone) fill_circle(renderer, d.x, d.y, kDotRadius);
@@ -2540,6 +2640,12 @@ int main(int, char**) {
                     fullscreen = !fullscreen;
                     SDL_SetWindowFullscreen(
                         window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                    // Nothing in the game is pointed at, and fullscreen is the
+                    // mode you sit back for — a pointer parked over the picture
+                    // is the one thing on the glass that is not the game. It
+                    // comes back with the window, where it is the desktops
+                    // again and wanted for the title bar.
+                    SDL_ShowCursor(fullscreen ? SDL_DISABLE : SDL_ENABLE);
                 } else if (event.key.keysym.scancode == SDL_SCANCODE_R) {
                     // Re-read config.json so tweaking values needs no rebuild.
                     cfg = load_and_report();

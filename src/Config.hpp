@@ -40,10 +40,19 @@ struct Config {
     // it there. `close` is how long the walls take to come all the way in — and
     // to open back out when the key is let go — `warn` how long the ball takes
     // it before it starts to give, and `crush` how much longer it lasts after
-    // that before the grip has it.
+    // that before the grip has it. `recharge` is the wait between one grab and
+    // the next — the bar along the top of the window — which only fills once
+    // the frame has let go, so a long hold is not also a free recharge.
     float squeeze_close = 0.25f;
     float squeeze_warn  = 1.6f;
     float squeeze_crush = 1.2f;
+    float squeeze_recharge = 6.0f;
+    // And every fill makes the next one dearer, as a multiplier on the last:
+    // 1.0 is a grab that costs the same all run, 1.35 is a third again each
+    // time. Like the circle's growth it stacks and only a reset takes it back.
+    float squeeze_recharge_growth = 1.8f;
+    // How wide the bar itself is drawn, centered along the top of the window.
+    float squeeze_bar_width = 160.0f;
 
     float     circle_diameter = 48.0f;
     float     circle_speed    = 340.0f; // pixels per second
@@ -267,6 +276,10 @@ inline Config load_config(std::string* loaded_from = nullptr,
         cfg.squeeze_close = squeeze.value("close", cfg.squeeze_close);
         cfg.squeeze_warn  = squeeze.value("warn",  cfg.squeeze_warn);
         cfg.squeeze_crush = squeeze.value("crush", cfg.squeeze_crush);
+        cfg.squeeze_recharge = squeeze.value("recharge", cfg.squeeze_recharge);
+        cfg.squeeze_recharge_growth =
+            squeeze.value("recharge_growth", cfg.squeeze_recharge_growth);
+        cfg.squeeze_bar_width = squeeze.value("bar_width", cfg.squeeze_bar_width);
 
         cfg.circle_diameter = circle.value("diameter", cfg.circle_diameter);
         cfg.circle_speed    = circle.value("speed",    cfg.circle_speed);
@@ -357,6 +370,14 @@ inline Config load_config(std::string* loaded_from = nullptr,
     cfg.squeeze_warn  = std::max(cfg.squeeze_warn, 0.0f);
     // Long enough that the shake is a warning rather than an announcement.
     cfg.squeeze_crush = std::max(cfg.squeeze_crush, 0.1f);
+    // The bar is divided by this, and a grab with no wait behind it is no cost.
+    cfg.squeeze_recharge = std::max(cfg.squeeze_recharge, 0.1f);
+    // Below 1.0 a grab would get cheaper the more it was used, which is not
+    // what it is for; the ceiling keeps a steep one from running away.
+    cfg.squeeze_recharge_growth = std::clamp(cfg.squeeze_recharge_growth, 1.0f, 4.0f);
+    // Wide enough that the fill is still readable, never wider than the window.
+    cfg.squeeze_bar_width =
+        std::clamp(cfg.squeeze_bar_width, 20.0f, static_cast<float>(cfg.window_w));
     cfg.circle_speed    = std::max(cfg.circle_speed, 0.0f);
     cfg.circle_start_x  = std::clamp(cfg.circle_start_x, 0.0f, 1.0f);
     cfg.circle_start_y  = std::clamp(cfg.circle_start_y, 0.0f, 1.0f);

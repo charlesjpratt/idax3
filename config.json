@@ -24,7 +24,10 @@
   "squeeze": {
     "close": 0.25,  // seconds for the walls to come all the way in, and to open back out
     "warn": 1.6,    // seconds the ball takes it before it starts to shake
-    "crush": 1.2    // seconds of shaking after that before the grip has it
+    "crush": 1.2,     // seconds of shaking after that before the grip has it
+    "recharge": 6,          // seconds the bar takes to fill before it can grab again
+    "recharge_growth": 1.8, // how much dearer each fill makes the next; 1.0 never changes
+    "bar_width": 160        // how wide the bar is drawn, centered along the top
   },
   "circle": {
     "diameter": 30,
@@ -49,7 +52,7 @@
   },
   "diamond": {
     "edge_margin_x": 60,
-    "edge_margin_y": 42
+    "edge_margin_y": 78
   },
   "hexagon": {
     "size": 14,

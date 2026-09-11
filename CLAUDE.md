@@ -216,8 +216,35 @@ more — and it pays out as it always does, but `update_diamond()` reports the
 pickup and the grip puts the clock straight to `squeeze.warn`, so the ball
 starts to give on the spot. Hazards keep coming and keep hurting. Nothing
 confines the ball, nothing shrinks the square, and no star appears, since only
-`Play` spawns those. `squeeze.close`, `squeeze.warn` and `squeeze.crush` are
-config; the grip's own clearance and its rattle are constants.
+`Play` spawns those.
+
+Taking hold is not free twice over. `World::charge` is spent whole by
+`begin_squeeze()` and fills back over `recharge_time()`, and both entries are
+gated on it being full, so there is a wait between one grab and the next. It
+fills only while the frame is *not* in `Phase::Squeeze`, which is the point: a
+long hold would otherwise be a free recharge, and the wait is meant to sit
+between grabs rather than run down behind a held key.
+
+The wait also grows. `World::recharge` is the duration itself, seeded from
+`squeeze.recharge` in `make_world()` and multiplied by `squeeze.recharge_growth`
+every time a fill lands, up to `kRechargeCeil`. So the grab is something a run
+spends rather than something it has, and the player who leans on it is the one
+who runs out of it — the same shape as the circle's growth per diamond, stacking
+all run. It is carried as a duration rather than worked out from a tally of
+fills because a hexagon settles it back *part* of the way, and half of a gap is
+not a whole number of fills. The ceiling is there so a steep multiplier turns
+the bar into a long wait rather than a wall. It is the bar along the
+top of the window: a dark gray track with the charge laid over it in
+`square.color`, because it is the square's to spend, so a bar short of full
+reads as a frame that cannot close. It fills both ways from the middle, the way
+the tally along the bottom grows, and the track sits under `kGlowFloor` so an
+empty bar blooms no more than the backdrop does.
+
+The whole of the grab is config — `squeeze.close`, `squeeze.warn`,
+`squeeze.crush`, `squeeze.recharge`, `squeeze.recharge_growth` and the bar's
+own `squeeze.bar_width`; what stays in the code is the grip's clearance, its
+rattle, the bar's height and place, and `kRechargeCeil`. The bar sits above the lives row, and `diamond.edge_margin_y` is what
+keeps the pickups off both of them, so moving either means moving that too.
 
 **The resting frame.** `resting_w()`/`resting_h()` report the size the square
 counts as being: its own, or the one a squeeze will spring back to.
@@ -367,9 +394,10 @@ showed, the ball released into open field with a fresh window running.
 
 `hazard_lobes()` is what keeps the two honest: it returns the one or two points a
 hazard's triangles actually occupy, and *both* drawing and collision go through
-it, so the shape you see is the shape that hits you. A touch (ball collider plus
-`kTriangleHit` of the size, tested per lobe) bursts the hazard through the same
-`fan_shards()` the ball uses and sends the ball into `Phase::Shake` — the
+it, so the shape you see is the shape that hits you. A touch (the guard radius plus
+`kTriangleHit` of the size, tested per lobe — ordinarily the ball's collider,
+but the star's ring while the star has the ball) bursts the hazard through the
+same `fan_shards()` the ball uses and sends the ball into `Phase::Shake` — the
 identical sequence a moving wall triggers: rattle, drop a dot, resume, or the
 death sequence if that was the last dot. The two kinds have separate config sections —
 `moving_hazard` and `still_hazard` — each with its own size, color, rate and
@@ -388,7 +416,8 @@ on the field, of every hazard — a waiting crossing judged by the *lane* it is
 about to run, since it is still parked off screen — and off the HUD rows. Collection is a rect-to-circle
 test — nearest point on the square to the hexagon's center, against
 `hexagon.size` — because it is the *frame* that collects this one, not the ball.
-Taking it doesn't resize the square, it sets a *target*: `kHexRecovery` of the
+Taking it settles both of the run's ratchets, and by the same line. The walls
+first: it doesn't resize the square, it sets a *target*, `kHexRecovery` of the
 way from the current size back to `square.width`/`height`. `grow_square()` then
 walks the walls out to it at `hexagon.grow_rate`, and while it is doing so the
 shrink holds off, so the two never fight over the same pixels. The target can
@@ -396,6 +425,13 @@ approach the starting size but never pass it. The gap it closes is measured off
 the *resting* frame, and `grow_square()` does not run during a squeeze at all,
 so one collected while the walls are shut on the ball counts the ground the
 shrink took rather than the grip, and is paid out once the frame is open again.
+
+Then the grab: `World::recharge` moves `kHexRecovery` of the way from what a
+fill costs now back to what the first one cost — the identical expression, on
+the identical constant. The square closing in and the bar getting dearer are the
+two things a run does to the player that nothing else undoes, and the hexagon is
+the one answer to both. A shorter fill also finishes the one already in progress
+sooner, since the bar is filled at `dt / recharge`.
 
 **The star.** Rarer than a diamond and not a pickup: it takes the ball off the
 player entirely. Everything about it is config — `star.size`, `star.color`,
@@ -440,7 +476,19 @@ radius is `kStarRingGap` per ball radius and its thickness `kStarRingWidth` of
 the same, floored at `kStarRingMin`, so the whole ring grows with every
 diamond. It is drawn
 with the ball rather than with the star, which is what puts it under the star
-and gives it the same rattle. Then the star spins in place around it at
+and gives it the same rattle.
+
+The ring is also what a crossing meets. While the star has the ball, a moving
+hazard that reaches the ring breaks on the yellow and the pink inside is
+untouched — a ball parked on a star has no say in where it is, so a hit there
+would be one with nothing to react with. `star_ring()` is the one place the two
+radii are worked out, and drawing and the hazard test both come through it, the
+same discipline `hazard_lobes()` keeps: what a crossing breaks on has to be the
+thing you can see it break on. The guard is the ring's whole *outer* radius
+rather than the band alone, so nothing steps over it between two ticks and finds
+the pink — at the configured speed a crossing spends two or three ticks inside
+that band — and it is floored at the ball's own collider, since a high
+`circle.collider_scale` can put the pink out past its own ring. Then the star spins in place around it at
 `star.spin_speed` for `star.hold` seconds — `fill_star()` takes that wound-up
 angle, and `spawn_star()` zeroes it so every star arrives upright. The square is
 still the player's to drive throughout, but the ball no longer has anything to
@@ -522,9 +570,9 @@ the same row-by-row fill with a linear taper. `fill_polygon()` covers what a clo
 even-odd scanline fill over sorted edge crossings — same one-line-per-row idea;
 `fill_star()` (concave, ten points) and `fill_triangle()` (three, one corner
 leading) both build their outline and hand it over. The diamond's green is the
-only hardcoded color left. The star draws last of the play field, over the ball. Last of all come the two
-HUD rows — the hits left along the top, the diamonds eaten along the bottom —
-which nothing on the field can cover; only the fade goes over them: a full-window black rect at `fade_alpha()`, which is why the
+only hardcoded color left. The star draws last of the play field, over the ball. Last of all comes the HUD —
+the grab's charge bar and the hits left along the top, the diamonds eaten along
+the bottom — which nothing on the field can cover; only the fade goes over it: a full-window black rect at `fade_alpha()`, which is why the
 renderer is put in `SDL_BLENDMODE_BLEND` at startup.
 
 config.json is parsed with comments allowed (`json::parse(..., ignore_comments)`),
@@ -551,7 +599,10 @@ widening the field: `picture_rect()` fits the frame to the window with its
 shape kept and black either side, which is the whole of what the mode changes.
 A reload rebuilds the frame either way — the `crt` section is baked into it —
 and only sets the window size when windowed, since a fullscreen window has none
-to set.
+to set. The mouse cursor is hidden with the toggle and comes back with the
+window: nothing in the game is ever pointed at, so in fullscreen a pointer
+parked over the picture is the only thing on the glass that is not the game,
+while in a window it is the desktop's again and wanted for the title bar.
 
 **The tube.** SDL's 2D renderer has no shader stage, so the CRT pass is built
 out of what it does have: `present_screen()` puts the finished frame up through
