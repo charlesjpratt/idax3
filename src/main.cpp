@@ -1898,6 +1898,11 @@ void step(World& w, const Config& cfg, const Input& in, float dt) {
         if (w.timer >= kFadeOutTime) {
             w = make_world(cfg);
             w.phase = Phase::Black;
+            // But not a game that has to be introduced again. The opening beat
+            // is for the opening: a player coming back from a death has taken
+            // hold of the square already and does not need asking twice, so the
+            // run is under way the moment the fade lifts.
+            w.started = true;
         }
         break;
 

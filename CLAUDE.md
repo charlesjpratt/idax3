@@ -150,8 +150,13 @@ does not shrink and `update_diamond()` returns early — the ball just bounces i
 a full-size frame. Both timers *hold* rather than drain while it waits, the same
 rule the hazard and star gates follow, so the first diamond comes a full gap
 after that first push. Everything downstream is gated on `World::eaten`, which
-cannot move before a diamond does, so one flag holds the whole field back. A
-reset clears it, so every life opens the same way.
+cannot move before a diamond does, so one flag holds the whole field back.
+
+It is the *opening* it holds, though, not every life. A death rebuilds the world
+behind the black and then sets `started` on it straight away, so the run is
+under way the moment the fade lifts: a player coming back has taken hold of the
+square already and does not need asking twice. Only a world that nobody has
+driven yet waits — the first one, and the one an R reload builds.
 
 When `drop_next_dot()` takes the last one, the sequence continues
 `Shake → Burst → FadeOut → Black → FadeIn → Play` instead: `burst_ball()` clears
