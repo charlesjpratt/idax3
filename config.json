@@ -9,7 +9,7 @@
   "square": {
     "width": 400,
     "height": 400,
-    "speed": 190,
+    "speed": 400,
     "acceleration": 650,
     "friction": 4200,
     "color": "#7FFFD4",
@@ -30,8 +30,8 @@
     "bar_width": 160        // how wide the bar is drawn, centered along the top
   },
   "circle": {
-    "diameter": 30,
-    "speed": 170,
+    "diameter": 35,
+    "speed": 340,
     "color": "#FF1493",
     "start_x": 0.5,
     "start_y": 0.65,
