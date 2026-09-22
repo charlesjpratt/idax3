@@ -1,2 +1,4 @@
 Bouncer_CPP_build/
 run.log
+dist/
+run.out.log

@@ -152,6 +152,15 @@ struct Config {
     float crt_glow       = 0.45f;  // phosphor bloom, lifted off a blurred copy
     float crt_aberration = 0.003f; // red/blue split at the rim, as a fraction
                                    // of the picture — 0 at the center either way
+
+    // The title screen: what the game is called, and the face it is set in.
+    // The font is looked for the same way config.json is — from the working
+    // directory, then up from the exe — so a path relative to the project root
+    // works however the game was started. Both are R-tunable, since a reload
+    // rebuilds the screen the title is baked into.
+    std::string title_text     = "IDAIDAIDA";
+    std::string title_subtitle = "A Game by Joe Dudley"; // the line under it; "" for none
+    std::string title_font     = "assets/Bungee-Regular.ttf";
 };
 
 namespace config_detail {
@@ -201,20 +210,21 @@ inline SDL_Color color_field(const nlohmann::json& obj, SDL_Color fallback) {
 
 } // namespace config_detail
 
-// config.json lives at the project root. Look there whether the game was
-// started from the root (cwd hit) or double-clicked in build/Release
-// (the exe-relative hits), so there is only ever one file to edit.
-inline std::vector<std::string> config_search_paths() {
-    std::vector<std::string> paths{"config.json"};
+// Where to look for a file that lives at the project root — config.json, and
+// the font the title is set in. Look there whether the game was started from
+// the root (cwd hit) or double-clicked in build/Release (the exe-relative
+// hits), so there is only ever one copy of anything to edit.
+inline std::vector<std::string> search_paths(const std::string& name) {
+    std::vector<std::string> paths{name};
 
     if (char* base = SDL_GetBasePath()) {
         const std::string dir = base;
         SDL_free(base);
         // SDL_GetBasePath() ends with a separator; ".." hops cover the
         // build/<Config>/ nesting that CMake generators produce.
-        paths.push_back(dir + "config.json");
-        paths.push_back(dir + "../config.json");
-        paths.push_back(dir + "../../config.json");
+        paths.push_back(dir + name);
+        paths.push_back(dir + "../" + name);
+        paths.push_back(dir + "../../" + name);
     }
     return paths;
 }
@@ -227,7 +237,7 @@ inline Config load_config(std::string* loaded_from = nullptr,
     if (loaded_from) loaded_from->clear();
     if (error) error->clear();
 
-    for (const std::string& path : config_search_paths()) {
+    for (const std::string& path : search_paths("config.json")) {
         std::ifstream file(path);
         if (!file) continue;
 
@@ -259,6 +269,7 @@ inline Config load_config(std::string* loaded_from = nullptr,
         const nlohmann::json moving_hazard = sub_object(root, "moving_hazard");
         const nlohmann::json still_hazard  = sub_object(root, "still_hazard");
         const nlohmann::json crt           = sub_object(root, "crt");
+        const nlohmann::json title         = sub_object(root, "title");
 
         cfg.window_w = window.value("width",  cfg.window_w);
         cfg.window_h = window.value("height", cfg.window_h);
@@ -345,6 +356,10 @@ inline Config load_config(std::string* loaded_from = nullptr,
         cfg.crt_vignette   = crt.value("vignette",   cfg.crt_vignette);
         cfg.crt_glow       = crt.value("glow",       cfg.crt_glow);
         cfg.crt_aberration = crt.value("aberration", cfg.crt_aberration);
+
+        cfg.title_text     = title.value("text",     cfg.title_text);
+        cfg.title_subtitle = title.value("subtitle", cfg.title_subtitle);
+        cfg.title_font     = title.value("font",     cfg.title_font);
 
         if (loaded_from) *loaded_from = path;
         break;

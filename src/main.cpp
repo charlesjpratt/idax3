@@ -6,9 +6,33 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
+
+// The title's font goes through stb_truetype, which is written as C and lights
+// up every warning a strict C++ build has. It is not this file's to fix, so its
+// warnings are turned off for the one include and back on after it.
+#if defined(_MSC_VER)
+#pragma warning(push, 0)
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
+#define STB_TRUETYPE_IMPLEMENTATION
+#define STBTT_STATIC
+#include <stb_truetype.h>
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 namespace {
 
@@ -227,6 +251,35 @@ constexpr float kTriShardSpeed = 240.0f;
 constexpr float kStickDead   = 0.22f; // of the stick's full reach
 constexpr float kTriggerPull = 0.30f; // of a trigger's full travel
 
+// The title screen. It is the face of the opening's wait: the field runs on
+// behind it, the ball bouncing in a full-size frame, until the first push
+// takes the square — then it fades and the HUD comes up in its place. The name
+// sits in the band above the centered square and the prompt in the band below
+// it, so neither covers the game it is introducing. What it says and what face
+// it is set in are config; where it sits and how big it is are here.
+constexpr float kTitleSize   = 170.0f; // pixel height of the name, before fitting
+constexpr float kTitleWidth  = 0.82f;  // of the window, the most the name may span
+constexpr float kTitleTrack  = 0.05f;  // letter spacing, per pixel height
+constexpr float kTitleY      = 0.17f;  // of the window height, the name's center
+// The byline, tucked under the name: small, set wide, and in a quiet color so
+// the name stays the thing that is lit.
+constexpr float kSubtitleSize  = 26.0f;
+constexpr float kSubtitleTrack = 0.10f;
+constexpr float kSubtitleY     = 0.255f;
+constexpr SDL_Color kSubtitleColor{0xDC, 0xDC, 0xDC, 0xFF};
+constexpr float kPromptSize  = 32.0f;
+constexpr float kPromptTrack = 0.08f;
+constexpr float kPromptY     = 0.80f;
+constexpr float kPromptPulse = 0.8f;   // breaths a second, so it reads as waiting
+constexpr float kPromptFloor = 0.35f;  // how dim a breath lets it go
+constexpr float kHintSize    = 20.0f;
+constexpr float kHintTrack   = 0.06f;
+constexpr float kHintY       = 0.875f;
+constexpr SDL_Color kHintColor{0x9A, 0x9A, 0x9A, 0xFF};
+constexpr float kTitleFadeRate = 2.5f; // how fast it goes once the run begins
+constexpr const char* kPromptText = "MOVE TO START";
+constexpr const char* kHintText   = "SPACE TO GRAB     F FULLSCREEN     R RELOAD";
+
 constexpr float kPi    = 3.1415927f;
 constexpr float kTwoPi = 6.2831853f;
 
@@ -318,6 +371,10 @@ struct World {
     bool  flash = false; // is this shake a wall's, and so flashing
     bool  ball_alive = true;
     bool  started = false; // has the player taken hold of the square yet
+    // How much of the title screen is still up: 1 over a world nobody has
+    // driven yet, eased to 0 once `started` lands. The HUD comes up through
+    // the same number, in the title's place.
+    float title = 1.0f;
     std::array<Tile, kBackMax> back{};
     int back_count = 0;
     float drift = 0.0f; // seconds the backdrop has been turning
@@ -1557,6 +1614,13 @@ void step(World& w, const Config& cfg, const Input& in, float dt) {
     const float alpha_target = (solid || driven) ? 1.0f : cfg.square_idle_alpha;
     const float alpha_step = kSquareFadeRate * dt;
     w.square_alpha += std::clamp(alpha_target - w.square_alpha, -alpha_step, alpha_step);
+
+    // The title screen goes the moment the run begins — eased, so the first
+    // tap reads as taking hold of the square rather than as switching a screen
+    // off. `started` never comes back down within a world, so this only ever
+    // runs the one way.
+    const float title_step = kTitleFadeRate * dt;
+    w.title += std::clamp((w.started ? 0.0f : 1.0f) - w.title, -title_step, title_step);
     if (w.grace > 0.0f) w.grace -= dt;
     if (w.ring  > 0.0f) w.ring  -= dt;
 
@@ -1901,8 +1965,10 @@ void step(World& w, const Config& cfg, const Input& in, float dt) {
             // But not a game that has to be introduced again. The opening beat
             // is for the opening: a player coming back from a death has taken
             // hold of the square already and does not need asking twice, so the
-            // run is under way the moment the fade lifts.
+            // run is under way the moment the fade lifts — and the title
+            // screen, which is the opening's, is not shown again either.
             w.started = true;
+            w.title = 0.0f;
         }
         break;
 
@@ -2185,6 +2251,212 @@ constexpr int kGlowStep  = 2;  // each blur pass halves the picture
 // what it says. The backdrop's own colors are kept under this on purpose.
 constexpr Uint8 kGlowFloor = 0x40;
 
+// -- Text --------------------------------------------------------------------
+// The title screen is the only text in the game, and it is baked rather than
+// drawn: each line is rasterized once, when the screen is built, into a white
+// texture carried by its alpha — the same arrangement as the backdrop's disc —
+// and tinted and faded at draw time. So the font is only open while the screen
+// is being built, and a frame costs one textured quad per line.
+
+struct Label {
+    SDL_Texture* tex = nullptr;
+    int w = 0, h = 0; // of the ink, cropped tight, so centering is on the letters
+};
+
+// One glyph of a laid-out line: which, and where its pen sits.
+struct Glyph {
+    int   index = 0;
+    float x = 0.0f;
+};
+
+// One codepoint off the front of a UTF-8 string, advancing `i` past it. A
+// malformed byte comes back as itself, so a title typed in plain ASCII is never
+// the worse for a stray one.
+Uint32 next_codepoint(const std::string& s, size_t* i) {
+    const unsigned char lead = static_cast<unsigned char>(s[*i]);
+    int extra = 0;
+    Uint32 cp = lead;
+    if      ((lead & 0xE0) == 0xC0) { extra = 1; cp = lead & 0x1F; }
+    else if ((lead & 0xF0) == 0xE0) { extra = 2; cp = lead & 0x0F; }
+    else if ((lead & 0xF8) == 0xF0) { extra = 3; cp = lead & 0x07; }
+    for (int k = 1; k <= extra; ++k) {
+        const size_t at = *i + static_cast<size_t>(k);
+        const unsigned char next = at < s.size() ? static_cast<unsigned char>(s[at]) : 0;
+        if ((next & 0xC0) != 0x80) { // cut off, or not a continuation: a stray
+            ++*i;
+            return lead;
+        }
+        cp = (cp << 6) | (next & 0x3F);
+    }
+    *i += static_cast<size_t>(extra) + 1;
+    return cp;
+}
+
+// Lays a line along a baseline: where each glyph's pen sits, and how far the
+// last one reaches. Kerning is the font's own; `tracking` is laid on top of it,
+// in pixels, since display type at a title's size wants more air between the
+// letters than a font's text metrics give it.
+float layout_text(const stbtt_fontinfo& font, const std::string& text, float scale,
+                  float tracking, std::vector<Glyph>* out) {
+    float pen = 0.0f;
+    int prev = 0;
+    size_t i = 0;
+    while (i < text.size()) {
+        const Uint32 cp = next_codepoint(text, &i);
+        const int index = stbtt_FindGlyphIndex(&font, static_cast<int>(cp));
+        if (prev) {
+            pen += static_cast<float>(stbtt_GetGlyphKernAdvance(&font, prev, index)) * scale +
+                   tracking;
+        }
+        int advance = 0, bearing = 0;
+        stbtt_GetGlyphHMetrics(&font, index, &advance, &bearing);
+        if (out) out->push_back(Glyph{index, pen});
+        pen += static_cast<float>(advance) * scale;
+        prev = index;
+    }
+    return pen;
+}
+
+// How wide a line comes to at a pixel height — what the title's fitting needs
+// to know before anything is rasterized. Advances scale linearly with the
+// height, so measuring once at any size says how big the line can be.
+float measure_text(const stbtt_fontinfo& font, const std::string& text,
+                   float pixel_height, float tracking) {
+    const float scale = stbtt_ScaleForPixelHeight(&font, pixel_height);
+    return layout_text(font, text, scale, tracking * pixel_height, nullptr);
+}
+
+// Rasterizes a line into a texture. Each glyph is drawn on its own and laid in
+// with a max, so two that overlap — a tight pair, a kern that tucks one under
+// another — union rather than the second clobbering the first. The result is
+// cropped to its ink, so a label's box is the letters and nothing else.
+Label bake_text(SDL_Renderer* renderer, const stbtt_fontinfo& font,
+                const std::string& text, float pixel_height, float tracking) {
+    Label label;
+    const float scale = stbtt_ScaleForPixelHeight(&font, pixel_height);
+    std::vector<Glyph> glyphs;
+    layout_text(font, text, scale, tracking * pixel_height, &glyphs);
+    if (glyphs.empty()) return label;
+
+    int ascent = 0, descent = 0, gap = 0;
+    stbtt_GetFontVMetrics(&font, &ascent, &descent, &gap);
+    const int baseline = static_cast<int>(std::ceil(static_cast<float>(ascent) * scale));
+    const int height = baseline + static_cast<int>(std::ceil(static_cast<float>(-descent) * scale)) + 2;
+
+    // The bitmap has to hold every glyph's box, which can poke out past its
+    // own advance on either side.
+    int left = 0, right = 0;
+    for (const Glyph& g : glyphs) {
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        stbtt_GetGlyphBitmapBox(&font, g.index, scale, scale, &x0, &y0, &x1, &y1);
+        const int pen = static_cast<int>(std::lround(g.x));
+        left  = std::min(left, pen + x0);
+        right = std::max(right, pen + x1);
+    }
+    const int width = right - left + 2;
+    if (width <= 2 || height <= 2) return label;
+
+    std::vector<Uint8> coverage(static_cast<size_t>(width) * static_cast<size_t>(height), 0);
+    std::vector<Uint8> glyph;
+    for (const Glyph& g : glyphs) {
+        if (g.index == 0) continue; // the font has no such glyph; leave its advance empty
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        stbtt_GetGlyphBitmapBox(&font, g.index, scale, scale, &x0, &y0, &x1, &y1);
+        const int gw = x1 - x0, gh = y1 - y0;
+        if (gw <= 0 || gh <= 0) continue; // a space
+
+        glyph.assign(static_cast<size_t>(gw) * static_cast<size_t>(gh), 0);
+        stbtt_MakeGlyphBitmap(&font, glyph.data(), gw, gh, gw, scale, scale, g.index);
+
+        const int ox = static_cast<int>(std::lround(g.x)) + x0 - left + 1;
+        const int oy = baseline + y0 + 1;
+        for (int y = 0; y < gh; ++y) {
+            const int ty = oy + y;
+            if (ty < 0 || ty >= height) continue;
+            for (int x = 0; x < gw; ++x) {
+                const int tx = ox + x;
+                if (tx < 0 || tx >= width) continue;
+                Uint8& dst = coverage[static_cast<size_t>(ty) * static_cast<size_t>(width) +
+                                      static_cast<size_t>(tx)];
+                dst = std::max(dst, glyph[static_cast<size_t>(y) * static_cast<size_t>(gw) +
+                                          static_cast<size_t>(x)]);
+            }
+        }
+    }
+
+    // Crop to the ink, with a pixel of clear around it for the filter to
+    // sample. An all-caps line in a face with room for descenders would
+    // otherwise center a third of the way down its own empty space.
+    int ink_left = width, ink_top = height, ink_right = -1, ink_bottom = -1;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (!coverage[static_cast<size_t>(y) * static_cast<size_t>(width) +
+                          static_cast<size_t>(x)]) continue;
+            ink_left   = std::min(ink_left, x);
+            ink_right  = std::max(ink_right, x);
+            ink_top    = std::min(ink_top, y);
+            ink_bottom = std::max(ink_bottom, y);
+        }
+    }
+    if (ink_right < ink_left) return label; // nothing but spaces
+    ink_left   = std::max(ink_left - 1, 0);
+    ink_top    = std::max(ink_top - 1, 0);
+    ink_right  = std::min(ink_right + 1, width - 1);
+    ink_bottom = std::min(ink_bottom + 1, height - 1);
+    label.w = ink_right - ink_left + 1;
+    label.h = ink_bottom - ink_top + 1;
+
+    std::vector<Uint32> pixels(static_cast<size_t>(label.w) * static_cast<size_t>(label.h));
+    for (int y = 0; y < label.h; ++y) {
+        for (int x = 0; x < label.w; ++x) {
+            const Uint32 alpha = coverage[static_cast<size_t>(ink_top + y) * static_cast<size_t>(width) +
+                                          static_cast<size_t>(ink_left + x)];
+            pixels[static_cast<size_t>(y) * static_cast<size_t>(label.w) + static_cast<size_t>(x)] =
+                (alpha << 24) | 0x00FFFFFFu; // white, carried by its alpha
+        }
+    }
+
+    label.tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+                                  SDL_TEXTUREACCESS_STATIC, label.w, label.h);
+    if (!label.tex) {
+        SDL_Log("no texture for \"%s\" (%s)", text.c_str(), SDL_GetError());
+        label = Label{};
+        return label;
+    }
+    SDL_UpdateTexture(label.tex, nullptr, pixels.data(),
+                      label.w * static_cast<int>(sizeof(Uint32)));
+    SDL_SetTextureScaleMode(label.tex, SDL_ScaleModeLinear);
+    SDL_SetTextureBlendMode(label.tex, SDL_BLENDMODE_BLEND);
+    return label;
+}
+
+void free_label(Label& l) {
+    if (l.tex) SDL_DestroyTexture(l.tex);
+    l = Label{};
+}
+
+// A label centered on a point, in a color, at a strength. The corner is
+// rounded to a pixel so the letters land 1:1 on the frame rather than being
+// resampled across a half-pixel seam.
+void draw_label(SDL_Renderer* renderer, const Label& l, float cx, float cy,
+                SDL_Color tint, float alpha) {
+    if (!l.tex || alpha <= 0.0f) return;
+    SDL_SetTextureColorMod(l.tex, tint.r, tint.g, tint.b);
+    SDL_SetTextureAlphaMod(l.tex, static_cast<Uint8>(std::lround(
+        std::clamp(alpha, 0.0f, 1.0f) * 255.0f)));
+    const SDL_FRect dest{std::round(cx - static_cast<float>(l.w) * 0.5f),
+                         std::round(cy - static_cast<float>(l.h) * 0.5f),
+                         static_cast<float>(l.w), static_cast<float>(l.h)};
+    SDL_RenderCopyF(renderer, l.tex, nullptr, &dest);
+}
+
+bool read_file(const std::string& path, std::vector<unsigned char>* out) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    out->assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    return !out->empty();
+}
+
 struct Screen {
     SDL_Texture* frame = nullptr; // the field, drawn at config size
     SDL_Texture* half  = nullptr; // halfway down to the blur
@@ -2194,6 +2466,9 @@ struct Screen {
     // How the floor is taken off the bloom. NONE if the backend has no
     // subtract, in which case the glow is the old indiscriminate one.
     SDL_BlendMode take_floor = SDL_BLENDMODE_NONE;
+    // The title screen's lines, baked once. Any of them can be empty — no
+    // font, no texture, a blank subtitle — and the screen simply has less on it.
+    Label title, subtitle, prompt, hint;
 };
 
 void free_screen(Screen& s) {
@@ -2202,7 +2477,51 @@ void free_screen(Screen& s) {
     if (s.glow)  SDL_DestroyTexture(s.glow);
     if (s.lines) SDL_DestroyTexture(s.lines);
     if (s.disc)  SDL_DestroyTexture(s.disc);
+    free_label(s.title);
+    free_label(s.subtitle);
+    free_label(s.prompt);
+    free_label(s.hint);
     s = Screen{};
+}
+
+// Bakes the title screen's text. The font is looked for where config.json is,
+// read whole — stb_truetype works straight off the file's bytes, so the buffer
+// has to outlive every glyph it rasterizes, which is only as long as the three
+// labels take — and closed again. A missing or broken font is logged and the
+// title screen goes up without its words: the field behind it is still a game.
+void build_labels(Screen& s, SDL_Renderer* renderer, const Config& cfg) {
+    std::vector<unsigned char> bytes;
+    std::string found;
+    for (const std::string& path : search_paths(cfg.title_font)) {
+        if (read_file(path, &bytes)) {
+            found = path;
+            break;
+        }
+    }
+    if (found.empty()) {
+        SDL_Log("no font at %s; the title screen has no text", cfg.title_font.c_str());
+        return;
+    }
+    stbtt_fontinfo font;
+    if (!stbtt_InitFont(&font, bytes.data(), stbtt_GetFontOffsetForIndex(bytes.data(), 0))) {
+        SDL_Log("%s is not a font stb_truetype can read; the title screen has no text",
+                found.c_str());
+        return;
+    }
+
+    // The name is fitted to the window: baked at `kTitleSize` unless that
+    // would run it past `kTitleWidth` of the width, in which case it is baked
+    // smaller rather than squashed at draw time — a texture scaled down would
+    // smear where one baked to size stays crisp.
+    float size = kTitleSize;
+    const float wide = measure_text(font, cfg.title_text, size, kTitleTrack);
+    const float room = static_cast<float>(cfg.window_w) * kTitleWidth;
+    if (wide > room && wide > 0.0f) size *= room / wide;
+
+    s.title    = bake_text(renderer, font, cfg.title_text, size, kTitleTrack);
+    s.subtitle = bake_text(renderer, font, cfg.title_subtitle, kSubtitleSize, kSubtitleTrack);
+    s.prompt   = bake_text(renderer, font, kPromptText, kPromptSize, kPromptTrack);
+    s.hint   = bake_text(renderer, font, kHintText, kHintSize, kHintTrack);
 }
 
 // Sized off the config, so a reload rebuilds it. A failure here leaves `frame`
@@ -2210,6 +2529,7 @@ void free_screen(Screen& s) {
 // - a renderer that cannot hold a target still gets a game, just a flat one.
 void build_screen(Screen& s, SDL_Renderer* renderer, const Config& cfg) {
     free_screen(s);
+    build_labels(s, renderer, cfg); // before the frame: a flat game still has a title
 
     s.frame = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
                                 SDL_TEXTUREACCESS_TARGET, cfg.window_w, cfg.window_h);
@@ -2635,7 +2955,14 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
 
     // HUD: the grab's charge and the hits left along the top, the diamonds eaten
     // along the bottom. Drawn last of the field so nothing — square, ball,
-    // hazard or star — can cover them; only the fade goes over.
+    // hazard or star — can cover them; only the fade goes over. It comes up as
+    // the title screen goes down, through the same number: a full bar and three
+    // lives mean nothing over a run that has not begun.
+    const float hud = 1.0f - w.title;
+    const auto faded = [hud](SDL_Color c) {
+        c.a = static_cast<Uint8>(std::lround(static_cast<float>(c.a) * hud));
+        return c;
+    };
 
     // The charge bar: a dark gray track with the charge laid over it in the
     // square's own color, since it is the square's to spend. It fills both ways
@@ -2648,17 +2975,17 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
         static_cast<int>(std::lround(cfg.squeeze_bar_width)),
         static_cast<int>(std::lround(kBarHeight)),
     };
-    set_draw_color(renderer, kBarTrack);
+    set_draw_color(renderer, faded(kBarTrack));
     SDL_RenderFillRect(renderer, &track);
 
     const int filled = static_cast<int>(std::lround(static_cast<float>(track.w) * w.charge));
     if (filled > 0) {
         const SDL_Rect charged{track.x + (track.w - filled) / 2, track.y, filled, track.h};
-        set_draw_color(renderer, cfg.square_color);
+        set_draw_color(renderer, faded(cfg.square_color));
         SDL_RenderFillRect(renderer, &charged);
     }
 
-    set_draw_color(renderer, cfg.circle_color); // the dots match the ball
+    set_draw_color(renderer, faded(cfg.circle_color)); // the dots match the ball
     for (const Dot& d : w.dots) {
         if (!d.gone) fill_circle(renderer, d.x, d.y, kDotRadius);
     }
@@ -2669,10 +2996,31 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
     const float row_x = static_cast<float>(cfg.window_w) * 0.5f -
                         kScoreSpacing * static_cast<float>(shown - 1) * 0.5f;
     const float row_y = static_cast<float>(cfg.window_h) - kScoreBottom;
-    set_draw_color(renderer, kDiamondColor);
+    set_draw_color(renderer, faded(kDiamondColor));
     for (int i = 0; i < shown; ++i) {
         fill_diamond(renderer, row_x + kScoreSpacing * static_cast<float>(i), row_y,
                      kDiamondHalfW * kScoreScale, kDiamondHalfH * kScoreScale);
+    }
+
+    // The title screen, over the field and under the fade, so it fades up with
+    // the first world and goes on its own once the run begins. The name is in
+    // the ball's color and the prompt in the square's — the two things the
+    // player is about to be given — and the prompt breathes, since a line that
+    // is waiting on you should look like it. `drift` is its clock, being the one
+    // that runs through everything.
+    if (w.title > 0.0f) {
+        const float mid_x = static_cast<float>(cfg.window_w) * 0.5f;
+        const float breath = 0.5f + 0.5f * std::sin(w.drift * kPromptPulse * kTwoPi);
+        const float pulse = kPromptFloor + (1.0f - kPromptFloor) * breath;
+        draw_label(renderer, screen.title, mid_x,
+                   static_cast<float>(cfg.window_h) * kTitleY, cfg.circle_color, w.title);
+        draw_label(renderer, screen.subtitle, mid_x,
+                   static_cast<float>(cfg.window_h) * kSubtitleY, kSubtitleColor, w.title);
+        draw_label(renderer, screen.prompt, mid_x,
+                   static_cast<float>(cfg.window_h) * kPromptY, cfg.square_color,
+                   w.title * pulse);
+        draw_label(renderer, screen.hint, mid_x,
+                   static_cast<float>(cfg.window_h) * kHintY, kHintColor, w.title);
     }
 
     if (const Uint8 fade = fade_alpha(w); fade > 0) {
@@ -2735,7 +3083,7 @@ int main(int, char**) {
     Config cfg = load_and_report();
 
     SDL_Window* window = SDL_CreateWindow(
-        "Bouncer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        "IDAIDAIDA", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         cfg.window_w, cfg.window_h, SDL_WINDOW_SHOWN);
     if (!window) {
         SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());

@@ -10,6 +10,11 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# The C runtime is linked in rather than looked for, so a release runs on a
+# machine with no redistributable installed. Set before the dependencies so
+# SDL2 is built against the same one.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # ── Dependencies ─────────────────────────────────────────────────────────────
 include(FetchContent)
 
@@ -31,10 +36,24 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+# stb_truetype rasterizes the title screen's font. One public-domain header,
+# pulled on its own rather than with the whole stb repository behind it, and
+# pinned by commit and checksum so it is the same file every time.
+FetchContent_Declare(
+    stb_truetype
+    URL https://raw.githubusercontent.com/nothings/stb/2c980bb59875b0d32144a71867fbdebb2f77cd20/stb_truetype.h
+    URL_HASH SHA256=ecd30b05e0dd4fea3a13c26810dd9e1992dc379049482c393d5a19e6b5090aab
+    DOWNLOAD_NO_EXTRACT TRUE
+)
+FetchContent_MakeAvailable(stb_truetype)
+
 # ── Game executable ──────────────────────────────────────────────────────────
 add_executable(Bouncer_CPP src/main.cpp)
 
-target_include_directories(Bouncer_CPP PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(Bouncer_CPP PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${stb_truetype_SOURCE_DIR}
+)
 
 target_link_libraries(Bouncer_CPP PRIVATE
     SDL2::SDL2
