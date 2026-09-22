@@ -83,11 +83,12 @@
     "unlock_diamonds": 5
   },
   // The title screen, shown over the field until the square is first driven.
-  // The font is any TrueType/OpenType file, looked for from the project root.
+  // The face is built into the exe; "font" can name any TrueType/OpenType
+  // file instead, looked for from the project root.
   "title": {
     "text": "IDAIDAIDA",
     "subtitle": "A Game by Joe Dudley",
-    "font": "assets/Bungee-Regular.ttf"
+    "font": ""
   },
   // The tube the game is shown through. All of it is presentation: it changes
   // how the game looks, never where anything is or what it touches. R reloads

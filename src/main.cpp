@@ -1,6 +1,7 @@
 #include <SDL.h>
 
 #include "Config.hpp"
+#include "font_data.hpp" // the title's face, built in at build time
 
 #include <algorithm>
 #include <array>
@@ -276,6 +277,18 @@ constexpr float kHintSize    = 20.0f;
 constexpr float kHintTrack   = 0.06f;
 constexpr float kHintY       = 0.875f;
 constexpr SDL_Color kHintColor{0x9A, 0x9A, 0x9A, 0xFF};
+// The version, tucked into the lower right corner. It comes from the build —
+// `GAME_VERSION` is CMake's project version — so the screen and the release
+// tag can only disagree if someone forgets to bump the one before cutting
+// the other.
+constexpr float kVersionSize   = 18.0f;
+constexpr float kVersionTrack  = 0.06f;
+constexpr float kVersionMargin = 22.0f; // from the right and bottom edges to the ink
+constexpr SDL_Color kVersionColor{0x6E, 0x6E, 0x6E, 0xFF};
+#ifndef GAME_VERSION
+#define GAME_VERSION "dev"
+#endif
+constexpr const char* kVersionText = "v" GAME_VERSION;
 constexpr float kTitleFadeRate = 2.5f; // how fast it goes once the run begins
 constexpr const char* kPromptText = "MOVE TO START";
 constexpr const char* kHintText   = "SPACE TO GRAB     F FULLSCREEN     R RELOAD";
@@ -2468,7 +2481,7 @@ struct Screen {
     SDL_BlendMode take_floor = SDL_BLENDMODE_NONE;
     // The title screen's lines, baked once. Any of them can be empty — no
     // font, no texture, a blank subtitle — and the screen simply has less on it.
-    Label title, subtitle, prompt, hint;
+    Label title, subtitle, prompt, hint, version;
 };
 
 void free_screen(Screen& s) {
@@ -2481,32 +2494,39 @@ void free_screen(Screen& s) {
     free_label(s.subtitle);
     free_label(s.prompt);
     free_label(s.hint);
+    free_label(s.version);
     s = Screen{};
 }
 
-// Bakes the title screen's text. The font is looked for where config.json is,
-// read whole — stb_truetype works straight off the file's bytes, so the buffer
-// has to outlive every glyph it rasterizes, which is only as long as the three
-// labels take — and closed again. A missing or broken font is logged and the
-// title screen goes up without its words: the field behind it is still a game.
+// Bakes the title screen's text. The face is the one built into the exe unless
+// `title.font` names a file, which is looked for where config.json is and read
+// whole — stb_truetype works straight off the bytes, so a file's buffer has to
+// outlive every glyph it rasterizes, which is only as long as the labels take
+// to bake. A file that is missing or not a font is logged and the built-in one
+// stands in for it, so the screen always has its words.
 void build_labels(Screen& s, SDL_Renderer* renderer, const Config& cfg) {
+    const unsigned char* data = kFontData;
     std::vector<unsigned char> bytes;
-    std::string found;
-    for (const std::string& path : search_paths(cfg.title_font)) {
-        if (read_file(path, &bytes)) {
-            found = path;
-            break;
+    if (!cfg.title_font.empty()) {
+        for (const std::string& path : search_paths(cfg.title_font)) {
+            if (read_file(path, &bytes)) break;
+        }
+        if (bytes.empty()) {
+            SDL_Log("no font at %s; using the built-in one", cfg.title_font.c_str());
+        } else {
+            data = bytes.data();
         }
     }
-    if (found.empty()) {
-        SDL_Log("no font at %s; the title screen has no text", cfg.title_font.c_str());
-        return;
-    }
     stbtt_fontinfo font;
-    if (!stbtt_InitFont(&font, bytes.data(), stbtt_GetFontOffsetForIndex(bytes.data(), 0))) {
-        SDL_Log("%s is not a font stb_truetype can read; the title screen has no text",
-                found.c_str());
-        return;
+    if (!stbtt_InitFont(&font, data, stbtt_GetFontOffsetForIndex(data, 0))) {
+        if (data == kFontData) {
+            SDL_Log("the built-in font failed to load; the title screen has no text");
+            return;
+        }
+        SDL_Log("%s is not a font stb_truetype can read; using the built-in one",
+                cfg.title_font.c_str());
+        data = kFontData;
+        if (!stbtt_InitFont(&font, data, stbtt_GetFontOffsetForIndex(data, 0))) return;
     }
 
     // The name is fitted to the window: baked at `kTitleSize` unless that
@@ -2522,6 +2542,7 @@ void build_labels(Screen& s, SDL_Renderer* renderer, const Config& cfg) {
     s.subtitle = bake_text(renderer, font, cfg.title_subtitle, kSubtitleSize, kSubtitleTrack);
     s.prompt   = bake_text(renderer, font, kPromptText, kPromptSize, kPromptTrack);
     s.hint   = bake_text(renderer, font, kHintText, kHintSize, kHintTrack);
+    s.version  = bake_text(renderer, font, kVersionText, kVersionSize, kVersionTrack);
 }
 
 // Sized off the config, so a reload rebuilds it. A failure here leaves `frame`
@@ -3021,6 +3042,15 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
                    w.title * pulse);
         draw_label(renderer, screen.hint, mid_x,
                    static_cast<float>(cfg.window_h) * kHintY, kHintColor, w.title);
+        // The version sits in the corner rather than on the center line, so
+        // it is anchored by its far edge: the margin is from the ink to the
+        // window's edge whatever the number's length.
+        draw_label(renderer, screen.version,
+                   static_cast<float>(cfg.window_w) - kVersionMargin -
+                       static_cast<float>(screen.version.w) * 0.5f,
+                   static_cast<float>(cfg.window_h) - kVersionMargin -
+                       static_cast<float>(screen.version.h) * 0.5f,
+                   kVersionColor, w.title);
     }
 
     if (const Uint8 fade = fade_alpha(w); fade > 0) {

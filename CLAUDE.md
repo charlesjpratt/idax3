@@ -7,14 +7,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```powershell
 & "C:\Program Files\CMake\bin\cmake.exe" -S . -B Bouncer_CPP_build
 & "C:\Program Files\CMake\bin\cmake.exe" --build Bouncer_CPP_build --config Release
-.\Bouncer_CPP_build\Release\Bouncer_CPP.exe
+.\Bouncer_CPP_build\Release\IDAIDAIDA.exe
 ```
 
-There are no tests. The binary is the verification step. SDL2 and nlohmann_json
-are pulled by FetchContent, and so is `stb_truetype.h` — the one header on its
-own, pinned by commit and checksum, not the stb repository; a post-build step
-copies `SDL2.dll` next to the exe. The title's font lives in `assets/` (Bungee,
-under the OFL beside it) and is found at runtime, not copied at build.
+There are no tests. The binary is the verification step, and it is the whole
+release: one exe, nothing beside it. SDL2 is linked statically (`SDL_SHARED`
+off, `SDL_LIBC` on — static SDL against its own libc stand-ins fights the CRT
+at link time), the C runtime is linked in (`CMAKE_MSVC_RUNTIME_LIBRARY`), and
+on Windows it is a GUI-subsystem exe so launching it opens no console — which
+also means `SDL_Log` output goes nowhere visible outside a debugger. nlohmann_json
+and `stb_truetype.h` (the one header, pinned by commit and checksum) come by
+FetchContent. The title's font lives in `assets/` (Bungee, under the OFL
+beside it) and `cmake/embed.cmake` turns it into `generated/font_data.hpp` at
+build time, so the exe carries it. The `Config` defaults are kept identical to
+`config.json`, because the release runs without the file.
 
 ## Architecture
 
@@ -168,12 +174,15 @@ death rebuild zeroes it outright, beside `started`), and `render()` draws three
 lines by it, over the field and under the fade: the name at `kTitleY` in the
 ball's color, the byline (`title.subtitle`) under it at `kSubtitleY` in a quiet
 near-white, a prompt at `kPromptY` in the square's color that breathes on
-`drift`, and a hint line of the keys in gray. The bands are above and below the
+`drift`, a hint line of the keys in gray, and the version in the lower right
+corner, dimmer still — `GAME_VERSION`, which CMake defines from the project
+version, so bumping that is what changes the screen. The bands are above and below the
 centered square, so the attract-mode field — ball bouncing in a full frame —
 shows through untouched. The HUD comes up through `1 - title`, since a full
 bar and three lives mean nothing over a run that has not begun.
 
-The text is baked, not drawn: `build_labels()` opens `title.font` through
+The text is baked, not drawn: `build_labels()` opens the font — the embedded
+`kFontData`, or `title.font` if it names a readable file — through
 `stb_truetype`, lays each line out with `layout_text()` (the font's kerning
 plus a `k*Track` of tracking, since display type wants air), rasterizes it a
 glyph at a time into a coverage bitmap — max-composited, so overlaps union —
@@ -181,9 +190,10 @@ crops to the ink so centering is on the letters, and uploads a white texture
 carried by its alpha, tinted with `SDL_SetTextureColorMod` like the backdrop's
 disc. The name is fitted first: `measure_text()` at `kTitleSize`, and if that
 runs past `kTitleWidth` of the window it is baked smaller rather than scaled at
-draw time. The font is only open while the labels bake; a missing or unreadable
-one is logged and the screen goes up without its words. `title.text` and
-`title.font` are config, so R re-bakes them along with the rest of the screen.
+draw time. A file is only open while the labels bake; a missing or unreadable
+one is logged and the built-in face stands in. `title.text`, `title.subtitle`
+and `title.font` are config, so R re-bakes them along with the rest of the
+screen.
 
 When `drop_next_dot()` takes the last one, the sequence continues
 `Shake → Burst → FadeOut → Black → FadeIn → Play` instead: `burst_ball()` clears

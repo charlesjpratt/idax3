@@ -10,20 +10,22 @@
 #include <vector>
 
 // Every tunable in the game. Defaults here are what you get if config.json is
-// missing or a key is absent, so the game always runs.
+// missing or a key is absent, so the game always runs — and they are kept the
+// same as the file's, because a release ships without one: the exe on its own
+// is the tuned game, and config.json is for tuning it further.
 struct Config {
-    int window_w = 800;
-    int window_h = 600;
+    int window_w = 1280;
+    int window_h = 960;
 
-    SDL_Color background_color{0xAD, 0xD8, 0xE6, 0xFF};
+    SDL_Color background_color{0x00, 0x00, 0x00, 0xFF};
 
-    float     square_w     = 260.0f;
-    float     square_h     = 260.0f;
+    float     square_w     = 400.0f;
+    float     square_h     = 400.0f;
     // The square is driven, not teleported: `acceleration` builds speed up to
     // `speed`, and `friction` takes it away again once the keys are let go.
     // Friction well above acceleration is what makes it feel like it stops dead.
-    float     square_speed        = 260.0f;  // top speed, pixels per second
-    float     square_acceleration = 1400.0f; // pixels per second squared
+    float     square_speed        = 400.0f;  // top speed, pixels per second
+    float     square_acceleration = 650.0f;  // pixels per second squared
     float     square_friction     = 4200.0f; // pixels per second squared
     SDL_Color square_color{0x7F, 0xFF, 0xD4, 0xFF};
     float     square_outline = 3.0f;   // border thickness; the square is hollow
@@ -33,8 +35,8 @@ struct Config {
     // The square closes in as the game runs: `shrink_rate` pixels off its width
     // and height every second of open play, down to `min_size`. It holds while a
     // diamond boost is up and while a star has the ball.
-    float square_shrink_rate = 6.0f;
-    float square_min_size    = 90.0f;
+    float square_shrink_rate = 1.0f;
+    float square_min_size    = 10.0f;
 
     // The grab: holding space closes the frame in around the circle and keeps
     // it there. `close` is how long the walls take to come all the way in — and
@@ -54,25 +56,25 @@ struct Config {
     // How wide the bar itself is drawn, centered along the top of the window.
     float squeeze_bar_width = 160.0f;
 
-    float     circle_diameter = 48.0f;
+    float     circle_diameter = 35.0f;
     float     circle_speed    = 340.0f; // pixels per second
-    SDL_Color circle_color{0xFF, 0x69, 0xB4, 0xFF};
+    SDL_Color circle_color{0xFF, 0x14, 0x93, 0xFF};
 
     // How much bigger the circle gets per green diamond, as a multiplier on its
     // current size: 1.0 is no growth at all, 1.25 is a quarter wider each time.
     // The growth stacks and lasts until the game resets.
-    float circle_growth_per_diamond = 1.25f;
+    float circle_growth_per_diamond = 1.1f;
 
     // The circle collides on this fraction of its drawn size, so at 0.95 the
     // pink sinks a little into a wall instead of stopping short of it. Above
     // 1.0 it collides wider than it looks.
-    float circle_collider_scale = 0.95f;
+    float circle_collider_scale = 0.75f;
 
     // Start position as a fraction of the square's interior: 0 = touching the
     // left/top wall, 1 = touching the right/bottom wall, 0.5 = centered. Kept
     // relative so it stays meaningful when the square or circle is resized.
     float circle_start_x = 0.5f;
-    float circle_start_y = 0.5f;
+    float circle_start_y = 0.65f;
 
     // The star: how often one shows up, and the shape of the chase it starts.
     float     star_size    = 14.0f; // outer radius, in pixels
@@ -88,7 +90,7 @@ struct Config {
     // Fraction of `circle_speed` on the way out to a star — of the circle's top
     // speed, not of whatever it happens to be carrying, so a diamond boost does
     // not make the chase faster.
-    float star_seek_speed = 0.9f;
+    float star_seek_speed = 0.8f;
     float star_hold       = 3.0f;   // seconds the ball is held at the star
     // The ring the ball wears at the star stays on it this long after the
     // release, and anything red that reaches it in that time breaks on it.
@@ -102,7 +104,7 @@ struct Config {
     // own size: the HUD rows live top and bottom, and a pickup pinned to a side
     // is a chore to reach. Trimmed at spawn to what a small window can spare.
     float diamond_edge_margin_x = 60.0f;
-    float diamond_edge_margin_y = 42.0f;
+    float diamond_edge_margin_y = 78.0f;
 
     // The hexagon: the square's own pickup, and the only answer to the shrink.
     // Driving the square onto one wins back half the ground it has lost.
@@ -110,8 +112,8 @@ struct Config {
     SDL_Color hexagon_color{0x7F, 0xFF, 0xD4, 0xFF};
     float     hexagon_spin_speed = 0.12f; // revolutions per second, while it waits
     float     hexagon_grow_rate = 120.0f; // pixels per second the square opens back up
-    float     hexagon_gap_min = 8.0f;  // seconds between one being taken and the next
-    float     hexagon_gap_max = 16.0f;
+    float     hexagon_gap_min = 22.0f; // seconds between one being taken and the next
+    float     hexagon_gap_max = 40.0f;
     int       hexagon_unlock  = 7;     // diamonds eaten before any appear
 
     // Two red hazards, tuned apart but costing the circle the same hit. Each
@@ -122,45 +124,46 @@ struct Config {
     // A pair of triangles, drawn like a fast-forward button, crossing the
     // window through its center from a random direction.
     float     moving_hazard_size    = 16.0f;  // circumradius, in pixels
-    SDL_Color moving_hazard_color{0xE2, 0x3A, 0x2E, 0xFF};
-    float     moving_hazard_speed   = 220.0f; // pixels per second
+    SDL_Color moving_hazard_color{0xFF, 0x24, 0x00, 0xFF};
+    float     moving_hazard_speed   = 660.0f; // pixels per second
     // A translucent strip marks the line it will take, this many seconds before
     // it sets off down it.
     float     moving_hazard_warn    = 2.0f;
     float     moving_hazard_gap_min = 7.0f;   // seconds between crossings
     float     moving_hazard_gap_max = 15.0f;
-    int       moving_hazard_unlock  = 5;
+    int       moving_hazard_unlock  = 8;
 
     // One upright triangle planted on the field, gone again after `life`. It
     // spawns at its own size, half again, or double, evenly drawn.
     float     still_hazard_size    = 16.0f;
-    SDL_Color still_hazard_color{0xE2, 0x3A, 0x2E, 0xFF};
+    SDL_Color still_hazard_color{0xFF, 0x24, 0x00, 0xFF};
     float     still_hazard_gap_min = 5.0f;
     float     still_hazard_gap_max = 11.0f;
     float     still_hazard_arm     = 2.0f; // harmless outline before it arms
     float     still_hazard_life    = 4.0f; // dangerous seconds after that
-    int       still_hazard_unlock  = 0;
+    int       still_hazard_unlock  = 5;
 
     // The tube. The field is drawn at window size and only then put on the
     // window through a curved mesh, so all of this is presentation: it changes
     // what the game looks like, never where anything is or what it touches.
     bool  crt_enabled    = true;
-    float crt_curvature  = 0.10f;  // how far the glass bows; 0 is a flat panel
-    float crt_scanlines  = 0.22f;  // how dark the gap between lines goes
-    float crt_line_gap   = 3.0f;   // pixels from one scanline to the next
+    float crt_curvature  = 0.0f;   // how far the glass bows; 0 is a flat panel
+    float crt_scanlines  = 0.05f;  // how dark the gap between lines goes
+    float crt_line_gap   = 2.0f;   // pixels from one scanline to the next
     float crt_vignette   = 0.35f;  // how far the corners fall off
-    float crt_glow       = 0.45f;  // phosphor bloom, lifted off a blurred copy
-    float crt_aberration = 0.003f; // red/blue split at the rim, as a fraction
+    float crt_glow       = 1.0f;   // phosphor bloom, lifted off a blurred copy
+    float crt_aberration = 0.005f; // red/blue split at the rim, as a fraction
                                    // of the picture — 0 at the center either way
 
     // The title screen: what the game is called, and the face it is set in.
-    // The font is looked for the same way config.json is — from the working
-    // directory, then up from the exe — so a path relative to the project root
-    // works however the game was started. Both are R-tunable, since a reload
-    // rebuilds the screen the title is baked into.
+    // The face built into the exe is used unless `font` names a file, which is
+    // looked for the same way config.json is — from the working directory,
+    // then up from the exe — so a path relative to the project root works
+    // however the game was started. All R-tunable, since a reload rebuilds the
+    // screen the title is baked into.
     std::string title_text     = "IDAIDAIDA";
     std::string title_subtitle = "A Game by Joe Dudley"; // the line under it; "" for none
-    std::string title_font     = "assets/Bungee-Regular.ttf";
+    std::string title_font;                              // "" is the built-in one
 };
 
 namespace config_detail {

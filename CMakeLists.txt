@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(Bouncer_CPP VERSION 0.1.0 LANGUAGES CXX)
+# The version here is the one the title screen shows, so a release is cut by
+# bumping it and tagging the same number.
+project(Bouncer_CPP VERSION 1.0.1 LANGUAGES CXX)
 
 # Vendored deps still declare old cmake_minimum_required values — required when
 # building with CMake 4.x.
@@ -18,6 +20,13 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 # ── Dependencies ─────────────────────────────────────────────────────────────
 include(FetchContent)
 
+# SDL2 is linked in, not shipped beside the exe: the game is one file. Static
+# SDL wants the system C library rather than its own stand-ins, or the two
+# fight over memcpy and friends at link time.
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON  CACHE BOOL "" FORCE)
+set(SDL_LIBC   ON  CACHE BOOL "" FORCE)
+set(SDL_TEST   OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     SDL2
     GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
@@ -47,16 +56,44 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb_truetype)
 
+# ── The font, built in ───────────────────────────────────────────────────────
+# The title's face is turned into a header of bytes at build time, so the exe
+# carries it and there is no assets folder to keep beside it. Regenerated when
+# the .ttf changes; `title.font` in config.json can still point at another.
+set(FONT_FILE   ${CMAKE_SOURCE_DIR}/assets/Bungee-Regular.ttf)
+set(FONT_HEADER ${CMAKE_BINARY_DIR}/generated/font_data.hpp)
+add_custom_command(
+    OUTPUT  ${FONT_HEADER}
+    COMMAND ${CMAKE_COMMAND}
+        -DINPUT=${FONT_FILE} -DOUTPUT=${FONT_HEADER} -DNAME=kFontData
+        -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+    DEPENDS ${FONT_FILE} ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+    COMMENT "Embedding ${FONT_FILE}"
+)
+
 # ── Game executable ──────────────────────────────────────────────────────────
-add_executable(Bouncer_CPP src/main.cpp)
+add_executable(Bouncer_CPP src/main.cpp ${FONT_HEADER})
+
+# The file is the game's name, whatever the target is called. Windows gets a
+# GUI-subsystem exe, so launching it does not also open a console: SDL2main
+# supplies the WinMain that hands over to main().
+set_target_properties(Bouncer_CPP PROPERTIES
+    OUTPUT_NAME      IDAIDAIDA
+    WIN32_EXECUTABLE $<BOOL:${WIN32}>
+)
 
 target_include_directories(Bouncer_CPP PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${stb_truetype_SOURCE_DIR}
+    ${CMAKE_BINARY_DIR}/generated
+)
+
+target_compile_definitions(Bouncer_CPP PRIVATE
+    GAME_VERSION="${PROJECT_VERSION}"
 )
 
 target_link_libraries(Bouncer_CPP PRIVATE
-    SDL2::SDL2
+    SDL2::SDL2-static
     SDL2::SDL2main
     nlohmann_json::nlohmann_json
 )
@@ -65,10 +102,3 @@ target_compile_options(Bouncer_CPP PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4>
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic>
 )
-
-if(WIN32)
-    add_custom_command(TARGET Bouncer_CPP POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:Bouncer_CPP>
-    )
-endif()
