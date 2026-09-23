@@ -174,7 +174,10 @@ death rebuild zeroes it outright, beside `started`), and `render()` draws three
 lines by it, over the field and under the fade: the name at `kTitleY` in the
 ball's color, the byline (`title.subtitle`) under it at `kSubtitleY` in a quiet
 near-white, a prompt at `kPromptY` in the square's color that breathes on
-`drift`, a hint line of the keys in gray, and the version in the lower right
+`drift`, the keys out in the margins either side of the field — `MOVE` on the
+left and `GRAB` on the right, a block a hand, headed in the square's color
+with the keys themselves in gray, and F and R left off as things done to the
+game rather than played with — and the version in the lower right
 corner, dimmer still — `GAME_VERSION`, which CMake defines from the project
 version, so bumping that is what changes the screen. The bands are above and below the
 centered square, so the attract-mode field — ball bouncing in a full frame —
@@ -195,8 +198,79 @@ one is logged and the built-in face stands in. `title.text`, `title.subtitle`
 and `title.font` are config, so R re-bakes them along with the rest of the
 screen.
 
+**The high score board.** Five scores down the title screen's left margin,
+best first. A score is `World::eaten` — the diamonds a run ate, the same tally
+the bottom row draws — so the board counts the thing the player was already
+watching rather than inventing a number to go beside it.
+
+It is the one thing that outlives a run, and so the one thing written anywhere:
+`scores_path()` puts it in `SDL_GetPrefPath()`'s folder rather than beside the
+exe, which is what lets the release stay the single file it means to be. The
+file is `{"best": [...]}` and is read with the same forgiveness config.json is —
+a missing file is a first run, and a malformed one is logged and replaced by an
+empty board rather than refusing to start. `load_scores()` sorts what it reads
+instead of trusting the order, so a board edited by hand still reads the way a
+board should.
+
+`record_score()` is the whole rule: a run beats the last row or it does not go
+on, and a run that ate nothing is not a score, since 0 is where everyone
+starts. It reports whether the score landed, which is what decides if the
+labels are baked again — only a board that changed is worth re-baking.
+
+The run is handed over rather than posted from inside the simulation.
+`World::last_run` is set as `Phase::Burst` ends — the one place a run is over,
+whichever way the last dot went — and `main()` reads it, posts it and clears
+it. It is set *there* rather than at the rebuild because the table is shown two
+phases before `make_world()` runs, and a table that did not have the run you
+just finished on it would be the wrong table. That keeps files out of `step()`,
+which otherwise touches nothing but the world and the config. The board itself
+lives beside `Screen` in `main()` for the same reason: `World` is what a death
+throws away. `World::has_scores` goes the other way, main telling the world
+whether there is a table at all, since the burst has to decide whether to stop
+for one.
+
+The text is baked like every other line. `open_face()` is the font opening
+lifted out of `build_labels()`, since the board is the one part of the screen
+that changes while the game runs and has to be baked again on its own —
+`bake_board()` is that path, `build_labels()` the startup and R one, and
+`bake_board_rows()` is the baking both come through. Each row is two labels
+hung off a gutter — the rank anchored by its right edge, the score by its left,
+the same far-edge anchoring the version corner uses — because a column of
+center-anchored rows wanders as the digits change, and the numbers are what the
+board is read for. A row nobody has reached bakes nothing, and no heading is
+what the draw reads as there being no board at all, so an untouched one is
+absent rather than a column of noughts.
+
+It is shown after a game and nowhere else. `Phase::Board` is a beat of its own
+between the burst and the fade, the table centered over a scrim at `kBoardDim`
+— drawn after the HUD, so the scrim puts that down along with the field and the
+numbers are the lit thing while it is up, and before the fade, which is what
+takes it away. The title screen carries no board: an opening has no run to
+report.
+
+It waits on the player rather than on a clock. `Input::confirm` is the one
+thing read from events instead of polled — everything else here wants a held
+key and this wants the press, since a direction still down from the run that
+just ended would dismiss the table the instant it appeared. Escape, F and R
+already mean something, so it is every *other* key, plus any pad button. The
+flag is latched in `main()` until a tick has read it rather than cleared each
+frame: the loop is a fixed 120 Hz accumulator, so a frame on a faster display
+can run no tick at all, and a press landing on one of those would be dropped.
+`kBoardArm` is the one beat the table does not listen through, which is what
+stops the key that lost the run from taking it away unseen, and the prompt
+comes up on the same number so it never asks for a key it would ignore. It
+breathes on `drift` in the square's color, the way the title's prompt does, for
+the same reason: a line waiting on you should look like it.
+
+A burst with nothing to add to a board nobody has reached skips the phase
+entirely and goes straight to the fade — `w.eaten > 0 || w.has_scores` is the
+whole test — since an empty table is not worth stopping for. Everything about
+the board is a `k` constant rather than config, so it is the one part of the
+screen R cannot retune, though R does re-bake it along with the rest.
+
+
 When `drop_next_dot()` takes the last one, the sequence continues
-`Shake → Burst → FadeOut → Black → FadeIn → Play` instead: `burst_ball()` clears
+`Shake → Burst → Board → FadeOut → Black → FadeIn → Play` instead: `burst_ball()` clears
 `ball_alive` and calls `fan_shards()`, which throws a `std::array` of shards out
 on an even fan at staggered speeds and sizes (index-derived, so no RNG) —
 the ball and the triangles each own one such array — unconfined by the square;
@@ -685,13 +759,19 @@ window's pixels the screen's pixels, so the frame lands 1:1. Startup logs a line
 if the renderer's output size does not match the config after all, since a
 scaled picture is the first suspect when it looks soft.
 
-**F toggles fullscreen.** Every position in the game is derived from
+**The game opens fullscreen, and F toggles.** It is the mode the tube was
+drawn for, so it is where the game starts rather than somewhere a keypress
+has to get to; the flag is set before the window is made, which is what the
+creation flags and the startup scaling check both read — that check is a
+windowed concern, since fullscreen scales the picture on purpose.
+Every position in the game is derived from
 `cfg.window_w`/`window_h`, so fullscreen *scales* the picture instead of
 widening the field: `picture_rect()` fits the frame to the window with its
 shape kept and black either side, which is the whole of what the mode changes.
 A reload rebuilds the frame either way — the `crt` section is baked into it —
 and only sets the window size when windowed, since a fullscreen window has none
-to set. The mouse cursor is hidden with the toggle and comes back with the
+to set. The mouse cursor is hidden with the mode — at startup by the same
+line the toggle uses — and comes back with the
 window: nothing in the game is ever pointed at, so in fullscreen a pointer
 parked over the picture is the only thing on the glass that is not the game,
 while in a window it is the desktop's again and wanted for the title bar.

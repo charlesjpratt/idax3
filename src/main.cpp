@@ -273,9 +273,18 @@ constexpr float kPromptTrack = 0.08f;
 constexpr float kPromptY     = 0.80f;
 constexpr float kPromptPulse = 0.8f;   // breaths a second, so it reads as waiting
 constexpr float kPromptFloor = 0.35f;  // how dim a breath lets it go
-constexpr float kHintSize    = 20.0f;
-constexpr float kHintTrack   = 0.06f;
-constexpr float kHintY       = 0.875f;
+// The keys, in the margins either side of the centered field — the bands above
+// and below are the title's and the middle is the square's, so the sides are
+// what a screen already showing the game behind it has left. One block a hand:
+// what moves the frame on the left, what closes it on the right. F and R are
+// not here, being things done to the game rather than played with.
+constexpr float kKeysSize      = 20.0f;
+constexpr float kKeysTrack     = 0.06f;
+constexpr float kKeysHeadSize  = 27.0f;
+constexpr float kKeysHeadTrack = 0.14f;
+constexpr float kKeysX         = 0.155f; // of the width, each block's center
+constexpr float kKeysY         = 0.46f;  // of the height, the heading's center
+constexpr float kKeysGap       = 0.055f; // heading down to the keys under it
 constexpr SDL_Color kHintColor{0x9A, 0x9A, 0x9A, 0xFF};
 // The version, tucked into the lower right corner. It comes from the build —
 // `GAME_VERSION` is CMake's project version — so the screen and the release
@@ -291,12 +300,75 @@ constexpr SDL_Color kVersionColor{0x6E, 0x6E, 0x6E, 0xFF};
 constexpr const char* kVersionText = "v" GAME_VERSION;
 constexpr float kTitleFadeRate = 2.5f; // how fast it goes once the run begins
 constexpr const char* kPromptText = "MOVE TO START";
-constexpr const char* kHintText   = "SPACE TO GRAB     F FULLSCREEN     R RELOAD";
+constexpr const char* kKeysLeftHead  = "MOVE";
+constexpr const char* kKeysLeftText  = "ARROWS OR WASD";
+constexpr const char* kKeysRightHead = "GRAB";
+constexpr const char* kKeysRightText = "SPACEBAR";
+
+// The high score board, down the title screen's left. A score is the diamonds
+// one run ate — the tally the bottom row already draws, so the board counts
+// the thing the player was watching anyway rather than inventing a number.
+// It is the only thing here that outlives a run, and so the only thing
+// written anywhere: SDL's pref path, a per-user folder Windows already keeps
+// for it, which leaves the release the one exe with nothing beside it.
+// Rank and score are baked as two labels a gutter apart rather than one line
+// centered, since a column of center-anchored rows wanders as the digits
+// change and the numbers are the whole point of reading it.
+constexpr int   kBoardRows      = 5;
+constexpr float kBoardSize      = 34.0f;  // a row's digits
+constexpr float kBoardTrack     = 0.08f;
+constexpr float kBoardHeadSize  = 26.0f;
+constexpr float kBoardHeadTrack = 0.18f;
+constexpr float kBoardY         = 0.28f;  // of the height, the heading's center
+// The heading's drop and the row step are separate numbers so the places can
+// be closed up without first place moving off the spot it was laid out on.
+constexpr float kBoardHeadGap   = 0.088f; // of the height, heading to first place
+constexpr float kBoardStep      = 0.062f; // of the height, one place to the next
+constexpr float kBoardGap       = 30.0f;  // between a rank's ink and its group
+// A row is the rank, then the group the count-up turns into: rank right
+// against the middle, group left against it, so the ranks line up down the
+// column and a group always starts where the one that lands has to arrive.
+constexpr float kDigitGap       = 0.14f;  // of a digit's height, added to the advance
+constexpr float kGroupDiaW      = 0.34f;  // of a digit's height, the diamond's half width
+constexpr float kGroupDiaH      = 0.50f;
+constexpr float kGroupGap       = 0.30f;  // between diamond, X and number
+constexpr float kGroupExSize    = 0.55f;  // of the digits, the X between them
+// The ending. The field goes, the screen holds black, and what the run was
+// worth comes up on the backdrop alone: a diamond, an X, and a number counting
+// to the score. If it places, the three of them shrink onto the row they
+// earned while the table comes up under them.
+constexpr float kEndBlackTime   = 0.9f;   // black between the field going and the count
+constexpr float kTallyFade      = 0.8f;   // the count fading up out of that black
+constexpr float kTallyRate      = 16.0f;  // diamonds a second the number counts at
+constexpr float kTallyMin       = 0.7f;   // even a short score gets a count worth watching
+constexpr float kTallyHold      = 1.0f;   // beat on the finished number before it moves
+constexpr float kToBoardTime    = 0.85f;  // the group's trip to its row
+constexpr float kToBoardFade    = 0.35f;  // of that trip, the group handing over to the row
+constexpr float kTallyY         = 0.47f;  // of the height, the group's center as it counts
+constexpr float kTallyScale     = 2.6f;   // how much bigger the count is than a row
+// The table waits on the player rather than on a clock: a run's last score is
+// worth as long as it takes to look at. `kBoardArm` is the one beat it does
+// not listen for, so a key still down from the run — or the one that lost it —
+// cannot take the table away before it has been seen.
+constexpr float kBoardArm       = 0.40f;
+constexpr float kBoardPromptSize  = 24.0f;
+constexpr float kBoardPromptTrack = 0.12f;
+constexpr float kBoardPromptY     = 0.83f;
+constexpr const char* kBoardPromptText = "PRESS ANY KEY";
+constexpr SDL_Color kBoardHeadColor{0x9A, 0x9A, 0x9A, 0xFF};
+constexpr SDL_Color kBoardColor{0xDC, 0xDC, 0xDC, 0xFF};
+constexpr const char* kBoardHeadText = "BEST SCORES";
+// Where the board is kept. The org and app names are what make the folder.
+constexpr const char* kPrefOrg    = "Joe Dudley";
+constexpr const char* kPrefApp    = "IDAIDAIDA";
+constexpr const char* kScoresFile = "scores.json";
+
 
 constexpr float kPi    = 3.1415927f;
 constexpr float kTwoPi = 6.2831853f;
 
-enum class Phase { Play, Squeeze, Shake, Burst, FadeOut, Black, FadeIn,
+enum class Phase { Play, Squeeze, Shake, Burst, EndFade, EndBlack, Tally, ToBoard,
+                   Board, FadeOut, Black, FadeIn,
                    StarLook, StarSeek, StarHold };
 
 struct Tile {
@@ -414,6 +486,15 @@ struct World {
     float boost = 0.0f;        // seconds of extra speed left
     float grow = 1.0f;         // size multiplier, kept until the next reset
     Uint32 rng = 1u;
+    // The score a death just finished with, for main to put on the board, and
+    // -1 when there is none. It is carried out through the rebuild rather than
+    // step() being handed the board, which would put a file in the simulation.
+    int last_run = -1;
+    // Which row the finished run took, or -1 for a run that did not place.
+    // main works it out as it posts the score, and the tally reads it to know
+    // whether it has anywhere to go when it is done counting.
+    int last_rank = -1;
+    float tally = 0.0f; // what the count-up has reached, on its way to `eaten`
 };
 
 // Small LCG: the pickup wants scattered spawns, and this beats pulling in
@@ -1342,6 +1423,11 @@ bool update_triangles(World& w, const Config& cfg, float dt) {
 struct Input {
     float push_x = 0.0f, push_y = 0.0f;
     bool  grip = false;
+    // A key or pad button *going down* this frame. It is the one thing here
+    // read from events rather than polled: everything else wants a held key,
+    // and this wants the press — a direction still held from the run that just
+    // ended would otherwise dismiss the table the instant it appeared.
+    bool  confirm = false;
 };
 
 // An axis comes back as a signed 16-bit reach; this is that as a fraction.
@@ -1965,6 +2051,66 @@ void step(World& w, const Config& cfg, const Input& in, float dt) {
         // into the fade like any other, but the taking of it has to be seen.
         if ((!update_shards(w.shards, cfg, dt) && !w.draining) ||
             w.timer >= kShardTimeout) {
+            // The run is over here. Its score is handed over before the table
+            // is shown rather than at the rebuild, so the run that just ended
+            // is on the table it is shown — which is the whole point of
+            // showing it here. `eaten` is still the run's; the reset is two
+            // phases away.
+            w.last_run = w.eaten;
+            w.phase = Phase::EndFade;
+            w.timer = 0.0f;
+        }
+        break;
+
+    case Phase::EndFade:
+        // The field going. This is the one fade that does not rebuild at the
+        // end of it: the run is about to be counted, and `eaten` is the thing
+        // being counted, so make_world() waits until the ending is over.
+        if (w.timer >= kFadeOutTime) {
+            w.phase = Phase::EndBlack;
+            w.timer = 0.0f;
+        }
+        break;
+
+    case Phase::EndBlack:
+        if (w.timer >= kEndBlackTime) {
+            w.phase = Phase::Tally;
+            w.timer = 0.0f;
+            w.tally = 0.0f;
+        }
+        break;
+
+    case Phase::Tally: {
+        // Up out of the black, then the number climbs. The rate is a floor on
+        // the *time* as much as a speed: a run worth three diamonds would be
+        // over before it read as counting at all, so a short score is counted
+        // slower rather than not counted.
+        const float score = static_cast<float>(w.eaten);
+        const float rate = std::max(kTallyRate, score / kTallyMin);
+        if (w.timer >= kTallyFade) w.tally = std::min(w.tally + rate * dt, score);
+        // The hold is measured from the number landing, not from the phase
+        // starting, so the beat is the same however long the count took.
+        if (w.tally >= score && w.timer >= kTallyFade + kTallyHold) {
+            // A run that placed goes to its row; one that did not is simply
+            // over, and the next game is what follows.
+            w.phase = w.last_rank >= 0 ? Phase::ToBoard : Phase::FadeOut;
+            w.timer = 0.0f;
+        }
+        break;
+    }
+
+    case Phase::ToBoard:
+        if (w.timer >= kToBoardTime) {
+            w.phase = Phase::Board;
+            w.timer = 0.0f;
+        }
+        break;
+
+    case Phase::Board:
+        // The table stays until it is dismissed. Nothing moves through it but
+        // the backdrop and whatever dots are still falling, and both of those
+        // run outside this switch.
+        if (w.timer >= kBoardArm && in.confirm) {
             w.phase = Phase::FadeOut;
             w.timer = 0.0f;
         }
@@ -2234,12 +2380,15 @@ void draw_triangle(SDL_Renderer* renderer, float cx, float cy, float size, float
 // How much black covers the frame: opaque through the hold, ramped either side.
 Uint8 fade_alpha(const World& w) {
     float amount = 0.0f;
-    if (w.phase == Phase::FadeOut) {
+    if (w.phase == Phase::FadeOut || w.phase == Phase::EndFade) {
         amount = w.timer / kFadeOutTime;
-    } else if (w.phase == Phase::Black) {
+    } else if (w.phase == Phase::Black || w.phase == Phase::EndBlack) {
         amount = 1.0f;
     } else if (w.phase == Phase::FadeIn) {
         amount = 1.0f - w.timer / kFadeInTime;
+    } else if (w.phase == Phase::Tally) {
+        // The count comes up out of the black the way a world does.
+        amount = 1.0f - w.timer / kTallyFade;
     }
     return static_cast<Uint8>(std::lround(std::clamp(amount, 0.0f, 1.0f) * 255.0f));
 }
@@ -2451,16 +2600,25 @@ void free_label(Label& l) {
 // A label centered on a point, in a color, at a strength. The corner is
 // rounded to a pixel so the letters land 1:1 on the frame rather than being
 // resampled across a half-pixel seam.
-void draw_label(SDL_Renderer* renderer, const Label& l, float cx, float cy,
-                SDL_Color tint, float alpha) {
-    if (!l.tex || alpha <= 0.0f) return;
+// Everything here is baked to the size it is drawn at, with one exception: the
+// group that counts a run out shrinks onto its row, and a size that moves
+// cannot be baked. It is baked at each end instead and scaled only in between,
+// so both of the sizes it rests at are still crisp.
+void draw_label_scaled(SDL_Renderer* renderer, const Label& l, float cx, float cy,
+                       SDL_Color tint, float alpha, float scale) {
+    if (!l.tex || alpha <= 0.0f || scale <= 0.0f) return;
     SDL_SetTextureColorMod(l.tex, tint.r, tint.g, tint.b);
     SDL_SetTextureAlphaMod(l.tex, static_cast<Uint8>(std::lround(
         std::clamp(alpha, 0.0f, 1.0f) * 255.0f)));
-    const SDL_FRect dest{std::round(cx - static_cast<float>(l.w) * 0.5f),
-                         std::round(cy - static_cast<float>(l.h) * 0.5f),
-                         static_cast<float>(l.w), static_cast<float>(l.h)};
+    const float w = static_cast<float>(l.w) * scale;
+    const float h = static_cast<float>(l.h) * scale;
+    const SDL_FRect dest{std::round(cx - w * 0.5f), std::round(cy - h * 0.5f), w, h};
     SDL_RenderCopyF(renderer, l.tex, nullptr, &dest);
+}
+
+void draw_label(SDL_Renderer* renderer, const Label& l, float cx, float cy,
+                SDL_Color tint, float alpha) {
+    draw_label_scaled(renderer, l, cx, cy, tint, alpha, 1.0f);
 }
 
 bool read_file(const std::string& path, std::vector<unsigned char>* out) {
@@ -2468,6 +2626,154 @@ bool read_file(const std::string& path, std::vector<unsigned char>* out) {
     if (!file) return false;
     out->assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
     return !out->empty();
+}
+
+// ── The high score board ─────────────────────────────────────────────────────
+// Five scores, best first, 0 standing for a row nobody has reached. Every
+// failure here is a log line and nothing more: a board that cannot be read is
+// an empty one, a board that cannot be written is a run that went unrecorded,
+// and neither is worth refusing to play over.
+struct Scores {
+    std::array<int, kBoardRows> best{};
+};
+
+// Empty if SDL has no folder to offer, which every caller reads as "no board".
+std::string scores_path() {
+    char* dir = SDL_GetPrefPath(kPrefOrg, kPrefApp);
+    if (!dir) {
+        SDL_Log("no place to keep the score board (%s)", SDL_GetError());
+        return std::string();
+    }
+    std::string path = std::string(dir) + kScoresFile;
+    SDL_free(dir);
+    return path;
+}
+
+void load_scores(Scores& s) {
+    s = Scores{};
+    const std::string path = scores_path();
+    if (path.empty()) return;
+    std::ifstream file(path);
+    if (!file) return; // no file yet is a first run, not a fault
+    try {
+        const nlohmann::json root = nlohmann::json::parse(file, nullptr, true, true);
+        const nlohmann::json best = root.value("best", nlohmann::json::array());
+        const int count = std::min(static_cast<int>(best.size()), kBoardRows);
+        for (int i = 0; i < count; ++i) {
+            s.best[i] = std::max(best[i].get<int>(), 0);
+        }
+    } catch (const std::exception& e) {
+        SDL_Log("the score board could not be read (%s); starting a fresh one", e.what());
+        s = Scores{};
+        return;
+    }
+    // The file's order is not trusted: sorting here is what lets a board that
+    // was edited by hand still read the way a board is meant to.
+    std::sort(s.best.begin(), s.best.end(), [](int a, int b) { return a > b; });
+}
+
+void save_scores(const Scores& s) {
+    const std::string path = scores_path();
+    if (path.empty()) return;
+    std::ofstream file(path);
+    if (!file) {
+        SDL_Log("the score board could not be written to %s", path.c_str());
+        return;
+    }
+    nlohmann::json root;
+    root["best"] = s.best;
+    file << root.dump(2) << '\n';
+}
+
+// Puts a finished run on the board and says which row it took, or -1 for one
+// that did not place — which is what the ending reads to know whether the count
+// has anywhere to fly to. A run that ate nothing is not a score: the board is
+// for what was reached, and 0 is where everyone starts.
+int record_score(Scores& s, int score) {
+    if (score <= 0 || score <= s.best[kBoardRows - 1]) return -1;
+    s.best[kBoardRows - 1] = score;
+    std::sort(s.best.begin(), s.best.end(), [](int a, int b) { return a > b; });
+    save_scores(s);
+    // Where it came to rest. Ties are scanned from the bottom, so a run that
+    // only matches an older one takes the row under it: the score that got
+    // there first keeps the better place.
+    for (int i = kBoardRows - 1; i >= 0; --i) {
+        if (s.best[static_cast<size_t>(i)] == score) return i;
+    }
+    return -1;
+}
+
+// One size of the number face. The digits are baked apart and set on a fixed
+// advance rather than laid out as a word, because the count-up's number
+// changes every few frames and proportional digits would shuffle the whole of
+// it sideways on every tick.
+struct NumFace {
+    std::array<Label, 10> digit{};
+    Label ex;         // the X between the diamond and the number
+    float adv = 0.0f; // the widest digit plus its gap
+    float h   = 0.0f; // a digit's height, which the group's layout is measured in
+};
+
+void free_face(NumFace& f) {
+    for (Label& l : f.digit) free_label(l);
+    free_label(f.ex);
+    f = NumFace{};
+}
+
+void bake_face(NumFace& f, SDL_Renderer* renderer, const stbtt_fontinfo& font,
+               float size) {
+    free_face(f);
+    for (int d = 0; d < 10; ++d) {
+        f.digit[static_cast<size_t>(d)] =
+            bake_text(renderer, font, std::to_string(d), size, 0.0f);
+        const Label& l = f.digit[static_cast<size_t>(d)];
+        f.h   = std::max(f.h, static_cast<float>(l.h));
+        f.adv = std::max(f.adv, static_cast<float>(l.w));
+    }
+    f.ex = bake_text(renderer, font, "X", size * kGroupExSize, 0.0f);
+    f.adv += f.h * kDigitGap;
+}
+
+int digit_count(int value) {
+    int n = 1;
+    for (int v = value; v >= 10; v /= 10) ++n;
+    return n;
+}
+
+// A diamond, an X and a number, measured in digit heights so the one layout
+// serves the size it counts at and the size it comes to rest at alike.
+float group_width(const NumFace& f, int value, float scale) {
+    return (kGroupDiaW * 2.0f + kGroupGap * 2.0f) * f.h * scale +
+           static_cast<float>(f.ex.w) * scale +
+           f.adv * scale * static_cast<float>(digit_count(value));
+}
+
+// Hung off its left edge rather than its center, so a row always starts where
+// the group landing on it has to arrive, whatever the number turns out to be.
+void draw_group(SDL_Renderer* renderer, const NumFace& f, int value, float left_x,
+                float cy, float scale, float alpha, SDL_Color ink) {
+    if (alpha <= 0.0f || scale <= 0.0f) return;
+    const float clamped = std::clamp(alpha, 0.0f, 1.0f);
+    const float dia_hw = kGroupDiaW * f.h * scale;
+    const float dia_hh = kGroupDiaH * f.h * scale;
+    const float gap    = kGroupGap * f.h * scale;
+    float x = left_x;
+    SDL_Color green = kDiamondColor;
+    green.a = static_cast<Uint8>(std::lround(clamped * 255.0f));
+    set_draw_color(renderer, green);
+    fill_diamond(renderer, x + dia_hw, cy, dia_hw, dia_hh);
+    x += dia_hw * 2.0f + gap;
+    draw_label_scaled(renderer, f.ex, x + static_cast<float>(f.ex.w) * scale * 0.5f, cy,
+                      ink, clamped, scale);
+    x += static_cast<float>(f.ex.w) * scale + gap;
+    const int count = digit_count(value);
+    for (int i = count - 1; i >= 0; --i) {
+        int digit = value;
+        for (int drop = 0; drop < i; ++drop) digit /= 10;
+        draw_label_scaled(renderer, f.digit[static_cast<size_t>(digit % 10)],
+                          x + f.adv * scale * 0.5f, cy, ink, clamped, scale);
+        x += f.adv * scale;
+    }
 }
 
 struct Screen {
@@ -2481,7 +2787,15 @@ struct Screen {
     SDL_BlendMode take_floor = SDL_BLENDMODE_NONE;
     // The title screen's lines, baked once. Any of them can be empty — no
     // font, no texture, a blank subtitle — and the screen simply has less on it.
-    Label title, subtitle, prompt, hint, version;
+    Label title, subtitle, prompt, version;
+    // The keys, one block either side of the field.
+    Label keys_left_head, keys_left, keys_right_head, keys_right;
+    // The board. Its numbers are not baked: they are set from `big`/`small`, a
+    // digit at a time, which is what lets the count-up change its number every
+    // few frames and the row it lands on be drawn by the very same code.
+    Label board_head, board_prompt;
+    std::array<Label, kBoardRows> board_rank{};
+    NumFace big, small; // the size the run is counted at, and the size a row is
 };
 
 void free_screen(Screen& s) {
@@ -2493,20 +2807,30 @@ void free_screen(Screen& s) {
     free_label(s.title);
     free_label(s.subtitle);
     free_label(s.prompt);
-    free_label(s.hint);
+    free_label(s.keys_left_head);
+    free_label(s.keys_left);
+    free_label(s.keys_right_head);
+    free_label(s.keys_right);
     free_label(s.version);
+    free_label(s.board_head);
+    free_label(s.board_prompt);
+    for (Label& l : s.board_rank) free_label(l);
+    free_face(s.big);
+    free_face(s.small);
     s = Screen{};
 }
 
-// Bakes the title screen's text. The face is the one built into the exe unless
+// Opens the face the screen is set in: the one built into the exe unless
 // `title.font` names a file, which is looked for where config.json is and read
-// whole — stb_truetype works straight off the bytes, so a file's buffer has to
-// outlive every glyph it rasterizes, which is only as long as the labels take
-// to bake. A file that is missing or not a font is logged and the built-in one
-// stands in for it, so the screen always has its words.
-void build_labels(Screen& s, SDL_Renderer* renderer, const Config& cfg) {
+// whole — stb_truetype works straight off the bytes, so the buffer has to
+// outlive every glyph baked from it, which is why it is the caller's to hold.
+// A file that is missing or not a font is logged and the built-in one stands in
+// for it, so the screen always has its words. False is the one case with no
+// face at all, and every caller reads it as having nothing to bake.
+bool open_face(const Config& cfg, std::vector<unsigned char>& bytes,
+               stbtt_fontinfo& font) {
     const unsigned char* data = kFontData;
-    std::vector<unsigned char> bytes;
+    bytes.clear();
     if (!cfg.title_font.empty()) {
         for (const std::string& path : search_paths(cfg.title_font)) {
             if (read_file(path, &bytes)) break;
@@ -2517,17 +2841,27 @@ void build_labels(Screen& s, SDL_Renderer* renderer, const Config& cfg) {
             data = bytes.data();
         }
     }
-    stbtt_fontinfo font;
     if (!stbtt_InitFont(&font, data, stbtt_GetFontOffsetForIndex(data, 0))) {
         if (data == kFontData) {
             SDL_Log("the built-in font failed to load; the title screen has no text");
-            return;
+            return false;
         }
         SDL_Log("%s is not a font stb_truetype can read; using the built-in one",
                 cfg.title_font.c_str());
         data = kFontData;
-        if (!stbtt_InitFont(&font, data, stbtt_GetFontOffsetForIndex(data, 0))) return;
+        bytes.clear();
+        if (!stbtt_InitFont(&font, data, stbtt_GetFontOffsetForIndex(data, 0))) return false;
     }
+    return true;
+}
+
+// Bakes every fixed thing on the screen. Nothing here depends on a score any
+// more — the numbers are set from the faces at draw time — so this runs once at
+// startup and again on R, and never in between.
+void build_labels(Screen& s, SDL_Renderer* renderer, const Config& cfg) {
+    std::vector<unsigned char> bytes;
+    stbtt_fontinfo font;
+    if (!open_face(cfg, bytes, font)) return;
 
     // The name is fitted to the window: baked at `kTitleSize` unless that
     // would run it past `kTitleWidth` of the width, in which case it is baked
@@ -2541,8 +2875,26 @@ void build_labels(Screen& s, SDL_Renderer* renderer, const Config& cfg) {
     s.title    = bake_text(renderer, font, cfg.title_text, size, kTitleTrack);
     s.subtitle = bake_text(renderer, font, cfg.title_subtitle, kSubtitleSize, kSubtitleTrack);
     s.prompt   = bake_text(renderer, font, kPromptText, kPromptSize, kPromptTrack);
-    s.hint   = bake_text(renderer, font, kHintText, kHintSize, kHintTrack);
+    s.keys_left_head  = bake_text(renderer, font, kKeysLeftHead, kKeysHeadSize,
+                                  kKeysHeadTrack);
+    s.keys_left       = bake_text(renderer, font, kKeysLeftText, kKeysSize, kKeysTrack);
+    s.keys_right_head = bake_text(renderer, font, kKeysRightHead, kKeysHeadSize,
+                                  kKeysHeadTrack);
+    s.keys_right      = bake_text(renderer, font, kKeysRightText, kKeysSize, kKeysTrack);
     s.version  = bake_text(renderer, font, kVersionText, kVersionSize, kVersionTrack);
+    s.board_prompt = bake_text(renderer, font, kBoardPromptText, kBoardPromptSize,
+                               kBoardPromptTrack);
+    s.board_head = bake_text(renderer, font, kBoardHeadText, kBoardHeadSize,
+                             kBoardHeadTrack);
+    for (int i = 0; i < kBoardRows; ++i) {
+        s.board_rank[static_cast<size_t>(i)] =
+            bake_text(renderer, font, std::to_string(i + 1) + ".", kBoardSize,
+                      kBoardTrack);
+    }
+    // Both ends of the trip the count-up makes, each baked to the size it comes
+    // to rest at, so only the moving part of it is ever scaled.
+    bake_face(s.small, renderer, font, kBoardSize);
+    bake_face(s.big, renderer, font, kBoardSize * kTallyScale);
 }
 
 // Sized off the config, so a reload rebuilds it. A failure here leaves `frame`
@@ -2799,8 +3151,115 @@ void present_screen(SDL_Renderer* renderer, const Screen& screen, const Config& 
     SDL_RenderPresent(renderer);
 }
 
+// A row's line, and the left edge its group is hung from. Both the board and
+// the trip that lands on it come through here, so what the group flies to is
+// by construction where the row draws.
+float board_row_y(const Config& cfg, int rank) {
+    return static_cast<float>(cfg.window_h) *
+           (kBoardY + kBoardHeadGap + kBoardStep * static_cast<float>(rank));
+}
+
+// Where a row's two parts sit. The table is centered on the window as a whole
+// block rather than each row being hung off the middle: a row is a rank and
+// then a group, which is nothing like symmetric, so centering the middle of a
+// row would sit the table off to one side of its own heading. Measured from
+// the widest rank and the widest group actually on the table, so it is the ink
+// that is centered and not some nominal column.
+struct BoardLayout {
+    float rank_right = 0.0f; // ranks are right-aligned to here
+    float group_left = 0.0f; // groups are hung from here
+};
+
+BoardLayout board_layout(const Config& cfg, const Screen& s, const Scores& scores) {
+    float rank_w = 0.0f, group_w = 0.0f;
+    for (int i = 0; i < kBoardRows; ++i) {
+        if (scores.best[static_cast<size_t>(i)] <= 0) continue;
+        rank_w = std::max(rank_w,
+                          static_cast<float>(s.board_rank[static_cast<size_t>(i)].w));
+        group_w = std::max(group_w, group_width(s.small,
+                                                scores.best[static_cast<size_t>(i)], 1.0f));
+    }
+    const float total = rank_w + kBoardGap + group_w;
+    const float left = static_cast<float>(cfg.window_w) * 0.5f - total * 0.5f;
+    return BoardLayout{left + rank_w, left + rank_w + kBoardGap};
+}
+
+// The table. Drawn at whatever it is worth being seen at: 0 while the count is
+// still the whole screen, 1 once the group has come home.
+void draw_board(SDL_Renderer* renderer, const Screen& screen, const Config& cfg,
+                const Scores& scores, float alpha) {
+    if (alpha <= 0.0f || scores.best[0] <= 0) return;
+    const float mid = static_cast<float>(cfg.window_w) * 0.5f;
+    const BoardLayout at = board_layout(cfg, screen, scores);
+    draw_label(renderer, screen.board_head, mid,
+               static_cast<float>(cfg.window_h) * kBoardY, kBoardHeadColor, alpha);
+    for (int i = 0; i < kBoardRows; ++i) {
+        if (scores.best[static_cast<size_t>(i)] <= 0) continue;
+        const float line_y = board_row_y(cfg, i);
+        const Label& rank = screen.board_rank[static_cast<size_t>(i)];
+        draw_label(renderer, rank, at.rank_right - static_cast<float>(rank.w) * 0.5f,
+                   line_y, kBoardColor, alpha);
+        draw_group(renderer, screen.small, scores.best[static_cast<size_t>(i)],
+                   at.group_left, line_y, 1.0f, alpha, kBoardColor);
+    }
+}
+
+// The ending, from the count coming up out of the black to the table waiting to
+// be dismissed. The field is gone by now — the backdrop is the whole of what is
+// behind this — so it is drawn in the field's place rather than over it.
+void draw_ending(SDL_Renderer* renderer, const Screen& screen, const World& w,
+                 const Config& cfg, const Scores& scores) {
+    const float mid = static_cast<float>(cfg.window_w) * 0.5f;
+    const float tally_y = static_cast<float>(cfg.window_h) * kTallyY;
+    const int shown = static_cast<int>(w.tally);
+
+    if (w.phase == Phase::Tally) {
+        // Centered while it is the only thing on the screen. It is hung off its
+        // left edge like every other group, so the center is taken off its width.
+        draw_group(renderer, screen.big, shown,
+                   mid - group_width(screen.big, shown, 1.0f) * 0.5f, tally_y,
+                   1.0f, 1.0f, kBoardColor);
+        return;
+    }
+
+    if (w.phase == Phase::ToBoard) {
+        // The trip. The group is baked big and the row is baked small, so the
+        // scale runs to the ratio between them rather than to some number of
+        // its own — it arrives exactly the size the row it lands on is drawn.
+        const float t = std::clamp(w.timer / kToBoardTime, 0.0f, 1.0f);
+        const float ease = t * t * (3.0f - 2.0f * t);
+        const float end_scale = screen.big.h > 0.0f ? screen.small.h / screen.big.h
+                                                    : 1.0f;
+        const float scale = 1.0f + (end_scale - 1.0f) * ease;
+        const float from_x = mid - group_width(screen.big, shown, 1.0f) * 0.5f;
+        const float x =
+            from_x + (board_layout(cfg, screen, scores).group_left - from_x) * ease;
+        const float y = tally_y + (board_row_y(cfg, w.last_rank) - tally_y) * ease;
+        // The table comes up under it, and the group hands over to the row it
+        // is landing on: by the end the two are the same size in the same place,
+        // so the crossfade is what makes the swap invisible.
+        draw_board(renderer, screen, cfg, scores, ease);
+        const float handover =
+            std::clamp((1.0f - t) / kToBoardFade, 0.0f, 1.0f);
+        draw_group(renderer, screen.big, shown, x, y, scale, handover, kBoardColor);
+        return;
+    }
+
+    // Phase::Board — the table on its own, waiting.
+    draw_board(renderer, screen, cfg, scores, 1.0f);
+    if (w.timer >= kBoardArm) {
+        // It breathes the way the title's prompt does, and for the same reason:
+        // a line that is waiting on you should look like it. It comes up only
+        // once the table is listening, so it never asks for a key it will ignore.
+        const float breath = 0.5f + 0.5f * std::sin(w.drift * kPromptPulse * kTwoPi);
+        draw_label(renderer, screen.board_prompt, mid,
+                   static_cast<float>(cfg.window_h) * kBoardPromptY, cfg.square_color,
+                   kPromptFloor + (1.0f - kPromptFloor) * breath);
+    }
+}
+
 void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
-            const Config& cfg) {
+            const Config& cfg, const Scores& scores) {
     // All of this lands on the off-screen frame; the tube pass puts it up.
     SDL_SetRenderTarget(renderer, screen.frame);
     set_draw_color(renderer, cfg.background_color);
@@ -2824,6 +3283,21 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
             set_draw_color(renderer, t.color);
             SDL_RenderFillRectF(renderer, &tile);
         }
+    }
+
+    // Once the run is being counted out, the backdrop is the whole of what is
+    // behind it: no square, no ball, no HUD. The ending is drawn in the field's
+    // place rather than over it, which is what the plain background asks for and
+    // saves the field a pass it would only be covered up for.
+    if (w.phase == Phase::Tally || w.phase == Phase::ToBoard ||
+        w.phase == Phase::Board) {
+        draw_ending(renderer, screen, w, cfg, scores);
+        if (const Uint8 fade = fade_alpha(w); fade > 0) {
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, fade);
+            SDL_RenderFillRect(renderer, nullptr);
+        }
+        present_screen(renderer, screen, cfg);
+        return;
     }
 
     const SDL_Rect square{
@@ -3040,8 +3514,19 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
         draw_label(renderer, screen.prompt, mid_x,
                    static_cast<float>(cfg.window_h) * kPromptY, cfg.square_color,
                    w.title * pulse);
-        draw_label(renderer, screen.hint, mid_x,
-                   static_cast<float>(cfg.window_h) * kHintY, kHintColor, w.title);
+        // A block a hand, out in the margins. The headings take the square's
+        // color, both being things it does; the keys themselves stay gray, the
+        // way the one line they replace was.
+        const float keys_y = static_cast<float>(cfg.window_h) * kKeysY;
+        const float keys_under = keys_y + static_cast<float>(cfg.window_h) * kKeysGap;
+        const float left_x  = static_cast<float>(cfg.window_w) * kKeysX;
+        const float right_x = static_cast<float>(cfg.window_w) * (1.0f - kKeysX);
+        draw_label(renderer, screen.keys_left_head, left_x, keys_y,
+                   cfg.square_color, w.title);
+        draw_label(renderer, screen.keys_left, left_x, keys_under, kHintColor, w.title);
+        draw_label(renderer, screen.keys_right_head, right_x, keys_y,
+                   cfg.square_color, w.title);
+        draw_label(renderer, screen.keys_right, right_x, keys_under, kHintColor, w.title);
         // The version sits in the corner rather than on the center line, so
         // it is anchored by its far edge: the margin is from the ink to the
         // window's edge whatever the number's length.
@@ -3053,6 +3538,13 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
                    kVersionColor, w.title);
     }
 
+    // The table, and the one thing on the screen that is a run's ending rather
+    // than part of it. It comes after the HUD so the scrim puts that down along
+    // with the field — for these few seconds the numbers are what is lit — and
+    // before the fade, which is what takes it away. Each row is hung off a
+    // gutter rather than centered: the rank anchored by its right edge and the
+    // score by its left, the same far-edge anchoring the version corner uses,
+    // so the digits line up instead of wandering as they change.
     if (const Uint8 fade = fade_alpha(w); fade > 0) {
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, fade);
         SDL_RenderFillRect(renderer, nullptr);
@@ -3112,14 +3604,24 @@ int main(int, char**) {
 
     Config cfg = load_and_report();
 
+    // The game opens on the glass. Fullscreen is the mode it is meant to be
+    // played in and the one the tube was drawn for, so it is where it starts
+    // rather than somewhere F has to be pressed to get to; F still toggles,
+    // which puts a window one key away. The flag is declared up here because
+    // the window is created by it and the scaling check below reads it.
+    bool fullscreen = true;
+
     SDL_Window* window = SDL_CreateWindow(
         "IDAIDAIDA", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        cfg.window_w, cfg.window_h, SDL_WINDOW_SHOWN);
+        cfg.window_w, cfg.window_h,
+        SDL_WINDOW_SHOWN | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     if (!window) {
         SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());
         SDL_Quit();
         return 1;
     }
+    // The cursor goes with the mode, by the same rule the toggle follows.
+    SDL_ShowCursor(fullscreen ? SDL_DISABLE : SDL_ENABLE);
 
     SDL_Renderer* renderer = SDL_CreateRenderer(
         window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -3135,7 +3637,7 @@ int main(int, char**) {
     // the window, which is the first thing worth knowing when it looks soft.
     int out_w = 0, out_h = 0;
     SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
-    if (out_w != cfg.window_w || out_h != cfg.window_h) {
+    if (!fullscreen && (out_w != cfg.window_w || out_h != cfg.window_h)) {
         SDL_Log("asked for %dx%d, drawing to %dx%d: the picture is being scaled",
                 cfg.window_w, cfg.window_h, out_w, out_h);
     }
@@ -3144,15 +3646,26 @@ int main(int, char**) {
     // frame of exactly that size; the tube pass is what fits the frame to the
     // window. So fullscreen scales the picture rather than widening the field,
     // and nothing above present_screen() knows which one it is looking at.
+    // The board outlives both the run and the world, so it is read once here
+    // and kept beside the screen — World is what a death throws away.
+    Scores scores;
+    load_scores(scores);
+
     Screen screen;
     build_screen(screen, renderer, cfg);
 
     World world = make_world(cfg);
 
     bool running = true;
-    bool fullscreen = false;
     Uint64 previous = SDL_GetPerformanceCounter();
     double accumulator = 0.0;
+
+    // Anything that went down, for the one thing that wants a press rather than
+    // a held key. It is held until a tick has actually read it rather than
+    // cleared every frame: the loop is a fixed 120 Hz accumulator, so a frame
+    // on a faster display can run no tick at all, and a press landing on one of
+    // those would otherwise be dropped.
+    bool confirmed = false;
 
     while (running) {
         SDL_Event event;
@@ -3196,7 +3709,13 @@ int main(int, char**) {
                     }
                     build_screen(screen, renderer, cfg);
                     world = make_world(cfg);
+                } else {
+                    // Escape, F and R already mean something; everything else
+                    // is free to be the any in `press any key`.
+                    confirmed = true;
                 }
+            } else if (event.type == SDL_CONTROLLERBUTTONDOWN) {
+                confirmed = true;
             }
         }
 
@@ -3206,13 +3725,27 @@ int main(int, char**) {
         previous = now;
         accumulator += std::min(frame, kMaxFrame);
 
-        const Input in = read_input(pad);
+        Input in = read_input(pad);
+        in.confirm = confirmed;
+        bool stepped = false;
         while (accumulator >= kFixedStep) {
+            stepped = true;
             step(world, cfg, in, static_cast<float>(kFixedStep));
             accumulator -= kFixedStep;
+            // A run that just ended, taken and cleared here so it is posted
+            // once. Only a score that lands is worth baking the board for.
+            // A run that just ended, taken and cleared here so it is posted
+            // once. The rank goes back to the world, which is what the count-up
+            // reads to know whether it has a row to fly to. Nothing is baked:
+            // the board's numbers are set from the faces at draw time.
+            if (world.last_run >= 0) {
+                world.last_rank = record_score(scores, world.last_run);
+                world.last_run = -1;
+            }
         }
+        if (stepped) confirmed = false; // read by a tick, so it is spent
 
-        render(renderer, screen, world, cfg);
+        render(renderer, screen, world, cfg, scores);
     }
 
     free_screen(screen);
