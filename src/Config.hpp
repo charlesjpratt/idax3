@@ -55,6 +55,13 @@ struct Config {
     float squeeze_recharge_growth = 1.8f;
     // How wide the bar itself is drawn, centered along the top of the window.
     float squeeze_bar_width = 160.0f;
+    // How the frame handles while it has the ball. A grab is being asked to put
+    // the ball somewhere, so it answers and settles harder than open driving
+    // and tops out lower — precise, but still a weight being moved: these scale
+    // the momentum rather than taking it away.
+    float grip_speed        = 0.55f; // of square.speed
+    float grip_acceleration = 3.2f;  // of square.acceleration
+    float grip_friction     = 3.2f;  // of square.friction
 
     float     circle_diameter = 35.0f;
     float     circle_speed    = 340.0f; // pixels per second
@@ -297,6 +304,10 @@ inline Config load_config(std::string* loaded_from = nullptr,
         cfg.squeeze_recharge_growth =
             squeeze.value("recharge_growth", cfg.squeeze_recharge_growth);
         cfg.squeeze_bar_width = squeeze.value("bar_width", cfg.squeeze_bar_width);
+        cfg.grip_speed = squeeze.value("grip_speed", cfg.grip_speed);
+        cfg.grip_acceleration =
+            squeeze.value("grip_acceleration", cfg.grip_acceleration);
+        cfg.grip_friction = squeeze.value("grip_friction", cfg.grip_friction);
 
         cfg.circle_diameter = circle.value("diameter", cfg.circle_diameter);
         cfg.circle_speed    = circle.value("speed",    cfg.circle_speed);
@@ -400,6 +411,11 @@ inline Config load_config(std::string* loaded_from = nullptr,
     // Wide enough that the fill is still readable, never wider than the window.
     cfg.squeeze_bar_width =
         std::clamp(cfg.squeeze_bar_width, 20.0f, static_cast<float>(cfg.window_w));
+    // A grip that could not move at all would strand the ball, and one with no
+    // friction would never settle, so both ends are kept off zero.
+    cfg.grip_speed        = std::clamp(cfg.grip_speed, 0.05f, 2.0f);
+    cfg.grip_acceleration = std::clamp(cfg.grip_acceleration, 0.1f, 20.0f);
+    cfg.grip_friction     = std::clamp(cfg.grip_friction, 0.1f, 20.0f);
     cfg.circle_speed    = std::max(cfg.circle_speed, 0.0f);
     cfg.circle_start_x  = std::clamp(cfg.circle_start_x, 0.0f, 1.0f);
     cfg.circle_start_y  = std::clamp(cfg.circle_start_y, 0.0f, 1.0f);

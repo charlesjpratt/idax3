@@ -86,6 +86,8 @@ constexpr float kDotTop     = 58.0f;   // center's distance from the top edge
 // both config — `squeeze.bar_width` and `squeeze.recharge`.
 constexpr float kBarHeight = 14.0f;
 constexpr float kBarTop    = 20.0f; // top edge's distance from the top of the window
+constexpr float kBarMaxWidth = 0.92f; // of the window, the widest it may ever grow
+constexpr float kBarGrowRate = 9.0f;  // how fast the track runs out to a new length
 // The ground the charge is drawn on, so an empty bar is still a bar. Dark
 // enough to sit under `kGlowFloor` and so bloom no more than the backdrop does
 // — the charge over it is the lit thing, and an empty bar should not glow.
@@ -495,6 +497,11 @@ struct World {
     // whether it has anywhere to go when it is done counting.
     int last_rank = -1;
     float tally = 0.0f; // what the count-up has reached, on its way to `eaten`
+    // How long the charge bar is drawn, as a multiple of `squeeze.bar_width`.
+    // It chases what `recharge` says it should be rather than being read off it,
+    // so a grab that has just been spent runs the track out to its new length
+    // instead of the track simply being longer the next time it is looked at.
+    float bar_span = 1.0f;
 };
 
 // Small LCG: the pickup wants scattered spawns, and this beats pulling in
@@ -1501,9 +1508,19 @@ bool move_square(World& w, const Config& cfg, const Input& in, float dt) {
     const float reach = std::sqrt(in.push_x * in.push_x + in.push_y * in.push_y);
     const bool pushing = reach > 0.0f;
 
+    // A grab handles differently from open driving. The frame is carrying the
+    // ball and being asked to put it somewhere, so it answers harder, settles
+    // harder and tops out lower — the three read together as precision. The
+    // momentum is scaled rather than taken away: it is still a weight being
+    // moved, and a grip that snapped to a stop would read as a cursor.
+    const bool grip = w.phase == Phase::Squeeze;
+    const float accel = cfg.square_acceleration * (grip ? cfg.grip_acceleration : 1.0f);
+    const float drag  = cfg.square_friction * (grip ? cfg.grip_friction : 1.0f);
+    const float top   = cfg.square_speed * (grip ? cfg.grip_speed : 1.0f);
+
     if (pushing) {
-        w.square_vx += in.push_x * cfg.square_acceleration * dt;
-        w.square_vy += in.push_y * cfg.square_acceleration * dt;
+        w.square_vx += in.push_x * accel * dt;
+        w.square_vy += in.push_y * accel * dt;
 
         // Cap the vector, not each axis, or a diagonal would outrun a straight
         // line. How far the stick is over is a top speed as well as a push, so
@@ -1515,16 +1532,15 @@ bool move_square(World& w, const Config& cfg, const Input& in, float dt) {
         // takes in a tick, so that path lands on exactly the old number; it is
         // easing a stick off that this is for, which should read like letting
         // go rather than like hitting something.
-        const float cap = cfg.square_speed * reach;
+        const float cap = top * reach;
         const float speed =
             std::sqrt(w.square_vx * w.square_vx + w.square_vy * w.square_vy);
         if (speed > cap && speed > 0.0f) {
             // Never above the configured top speed whatever happens, since a
             // friction set below the acceleration would otherwise let a tick
             // gain more than the next one gives back and the cap would leak.
-            const float shed = cfg.square_friction * dt;
-            const float target =
-                std::min(std::max(speed - shed, cap), cfg.square_speed);
+            const float shed = drag * dt;
+            const float target = std::min(std::max(speed - shed, cap), top);
             const float trim = target / speed;
             w.square_vx *= trim;
             w.square_vy *= trim;
@@ -1534,7 +1550,7 @@ bool move_square(World& w, const Config& cfg, const Input& in, float dt) {
         // reverse, so the square coasts to a stop rather than rebounding.
         const float speed =
             std::sqrt(w.square_vx * w.square_vx + w.square_vy * w.square_vy);
-        const float shed = cfg.square_friction * dt;
+        const float shed = drag * dt;
         if (speed <= shed || speed <= 0.0f) {
             w.square_vx = 0.0f;
             w.square_vy = 0.0f;
@@ -1677,6 +1693,13 @@ void release_squeeze(World& w, const Config& cfg) {
     apply_squeeze(w, cfg, 0.0f);
     w.squeeze = 0.0f;
     w.squeeze_time = 0.0f;
+    // Letting go is what makes the next fill dearer, and the track lengthens
+    // here with it — at the start of the wait rather than at the end. Growing
+    // it when a fill *completed* meant the bar reached its end and then jumped
+    // wider in the same instant, which read as the bar undoing itself; this way
+    // the grab is paid for at the moment it is spent and the longer track is
+    // there to be filled.
+    w.recharge = std::min(w.recharge * cfg.squeeze_recharge_growth, kRechargeCeil);
 }
 
 // Spends the speed boost. The size half of a diamond never lapses, so this only
@@ -1732,10 +1755,16 @@ void step(World& w, const Config& cfg, const Input& in, float dt) {
     // of fills.
     if (w.phase != Phase::Squeeze && w.charge < 1.0f) {
         w.charge = std::min(w.charge + dt / std::max(w.recharge, 0.0001f), 1.0f);
-        if (w.charge >= 1.0f) {
-            w.recharge = std::min(w.recharge * cfg.squeeze_recharge_growth, kRechargeCeil);
-        }
     }
+
+    // The track runs out to whatever the wait now costs — quickly, since it is
+    // the announcement of the price rather than the paying of it, and it happens
+    // with the charge at zero so there is no filled part to stretch with it. It
+    // runs *in* by the same rule when a hexagon settles the wait back down.
+    const float span_to = cfg.squeeze_recharge > 0.0f
+                              ? w.recharge / cfg.squeeze_recharge
+                              : 1.0f;
+    w.bar_span += (span_to - w.bar_span) * std::min(1.0f, kBarGrowRate * dt);
 
     w.timer += dt;
 
@@ -1977,8 +2006,15 @@ void step(World& w, const Config& cfg, const Input& in, float dt) {
     case Phase::StarHold: {
         // Caught: the ball parks where the star is and the star spins on that
         // spot for `star.hold`, then lets it go on a fresh diagonal.
-        const bool was_inside = ball_inside_square(w, cfg);
-
+        //
+        // This is the one phase a wall may pass over the ball for nothing. The
+        // hold is what asks the player to bring the frame out to meet the ball,
+        // and it is checked for exactly that when the star lets go, so charging
+        // for the crossing would be charging for the very thing being demanded
+        // — a ball sat on a spinning star cannot dodge, and there is no way to
+        // get the frame around it that does not cross it. `StarLook` and
+        // `StarSeek` still count crossings: there the ball is the player's to
+        // keep clear of, and it is only here that it is the star's.
         move_square(w, cfg, in, dt);
         age_boost(w, dt);
         update_diamond(w, cfg, dt);
@@ -1987,9 +2023,10 @@ void step(World& w, const Config& cfg, const Input& in, float dt) {
         const bool struck = update_triangles(w, cfg, dt);
         w.star.spin += cfg.star_spin_speed * kTwoPi * dt;
 
-        const bool crossed = ball_inside_square(w, cfg) != was_inside;
-        if (struck || (crossed && w.grace <= 0.0f)) {
-            w.flash = crossed; // the wall passing through it counts as a wall
+        // A hazard still lands, and the star's ring is still what it has to
+        // get past to do it.
+        if (struck) {
+            w.flash = false; // a hazard's shake is the red one's, never a wall's
             w.phase = Phase::Shake;
             w.timer = 0.0f;
             break;
@@ -2117,17 +2154,15 @@ void step(World& w, const Config& cfg, const Input& in, float dt) {
         break;
 
     case Phase::FadeOut:
-        // Rebuild behind the black, so fading back up reveals a fresh game.
+        // Rebuild behind the black, so fading back up reveals a fresh game —
+        // and reveals it on the title screen, which is where a run now ends up
+        // once its score has been counted out. The fresh world's own defaults
+        // are the whole of it: `started` false and `title` at 1, the same wait
+        // the very first world opens on. A run is something taken up rather
+        // than something you are dropped back into.
         if (w.timer >= kFadeOutTime) {
             w = make_world(cfg);
             w.phase = Phase::Black;
-            // But not a game that has to be introduced again. The opening beat
-            // is for the opening: a player coming back from a death has taken
-            // hold of the square already and does not need asking twice, so the
-            // run is under way the moment the fade lifts — and the title
-            // screen, which is the opening's, is not shown again either.
-            w.started = true;
-            w.title = 0.0f;
         }
         break;
 
@@ -3245,6 +3280,23 @@ void draw_ending(SDL_Renderer* renderer, const Screen& screen, const World& w,
         return;
     }
 
+    if (w.phase == Phase::FadeOut) {
+        // The ending's way out. Whatever the last beat was showing stays put
+        // while the black comes over it: the field is a whole game away by now,
+        // and popping it back for the length of a fade would undo the ending
+        // one frame before it finishes. Which beat that was is `last_rank` —
+        // the table if the run placed, the count it was left on if it did not —
+        // and it holds until the rebuild at the end of this very phase.
+        if (w.last_rank >= 0) {
+            draw_board(renderer, screen, cfg, scores, 1.0f);
+        } else {
+            draw_group(renderer, screen.big, shown,
+                       mid - group_width(screen.big, shown, 1.0f) * 0.5f, tally_y,
+                       1.0f, 1.0f, kBoardColor);
+        }
+        return;
+    }
+
     // Phase::Board — the table on its own, waiting.
     draw_board(renderer, screen, cfg, scores, 1.0f);
     if (w.timer >= kBoardArm) {
@@ -3290,7 +3342,7 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
     // place rather than over it, which is what the plain background asks for and
     // saves the field a pass it would only be covered up for.
     if (w.phase == Phase::Tally || w.phase == Phase::ToBoard ||
-        w.phase == Phase::Board) {
+        w.phase == Phase::Board || w.phase == Phase::FadeOut) {
         draw_ending(renderer, screen, w, cfg, scores);
         if (const Uint8 fade = fade_alpha(w); fade > 0) {
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, fade);
@@ -3463,11 +3515,22 @@ void render(SDL_Renderer* renderer, const Screen& screen, const World& w,
     // square's own color, since it is the square's to spend. It fills both ways
     // from the middle, the way the tally along the bottom grows, so the two HUD
     // rows read as one family. Full means the frame can take hold of the ball.
-    const float bar_x =
-        static_cast<float>(cfg.window_w) * 0.5f - cfg.squeeze_bar_width * 0.5f;
+    // The bar grows with what a fill costs rather than filling more slowly.
+    // `squeeze.bar_width` is the width of the *first* fill, scaled by how much
+    // dearer this one has become; since the filled part is the width times
+    // `charge` and `charge` climbs at `dt / recharge`, a width proportional to
+    // `recharge` makes the two cancel and the edge advances at the same pixels a
+    // second all run. What a run has cost itself is then something on the screen
+    // rather than only something felt.
+    // It cannot grow past the window. Past that point the bar is as long as it
+    // gets and the fill does slow again, which is the same bargain
+    // `kRechargeCeil` makes: a long wait rather than a wall.
+    const float bar_w = std::min(cfg.squeeze_bar_width * w.bar_span,
+                                 static_cast<float>(cfg.window_w) * kBarMaxWidth);
+    const float bar_x = static_cast<float>(cfg.window_w) * 0.5f - bar_w * 0.5f;
     const SDL_Rect track{
         static_cast<int>(std::lround(bar_x)), static_cast<int>(std::lround(kBarTop)),
-        static_cast<int>(std::lround(cfg.squeeze_bar_width)),
+        static_cast<int>(std::lround(bar_w)),
         static_cast<int>(std::lround(kBarHeight)),
     };
     set_draw_color(renderer, faded(kBarTrack));

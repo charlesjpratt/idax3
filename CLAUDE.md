@@ -162,15 +162,16 @@ rule the hazard and star gates follow, so the first diamond comes a full gap
 after that first push. Everything downstream is gated on `World::eaten`, which
 cannot move before a diamond does, so one flag holds the whole field back.
 
-It is the *opening* it holds, though, not every life. A death rebuilds the world
-behind the black and then sets `started` on it straight away, so the run is
-under way the moment the fade lifts: a player coming back has taken hold of the
-square already and does not need asking twice. Only a world that nobody has
-driven yet waits — the first one, and the one an R reload builds.
+Every world waits, and a death is no exception: the rebuild behind the black
+sets nothing on the fresh world, so `started` is false and `title` is 1 and the
+fade lifts on the title screen rather than on a run already going. A run is
+something taken up rather than something you are dropped back into — and after
+an ending that has just counted the last one out, being put straight back on
+the field would be the one beat with nowhere to put the result.
 
 **The title screen** is the face of that wait. `World::title` is 1 over a world
-nobody has driven and eases to 0 at `kTitleFadeRate` once `started` lands (the
-death rebuild zeroes it outright, beside `started`), and `render()` draws three
+nobody has driven and eases to 0 at `kTitleFadeRate` once `started` lands, and
+`render()` draws three
 lines by it, over the field and under the fade: the name at `kTitleY` in the
 ball's color, the byline (`title.subtitle`) under it at `kSubtitleY` in a quiet
 near-white, a prompt at `kPromptY` in the square's color that breathes on
@@ -373,7 +374,12 @@ between grabs rather than run down behind a held key.
 
 The wait also grows. `World::recharge` is the duration itself, seeded from
 `squeeze.recharge` in `make_world()` and multiplied by `squeeze.recharge_growth`
-every time a fill lands, up to `kRechargeCeil`. So the grab is something a run
+in `release_squeeze()` — at the moment the grip is let go, not when the fill
+that follows it lands — up to `kRechargeCeil`. The cost is taken where it is
+incurred, and the track lengthens at the start of the wait it measures rather
+than at the end: growing it on a completed fill meant the bar reached its own
+end and jumped wider in the same instant, which read as the bar undoing
+itself. So the grab is something a run
 spends rather than something it has, and the player who leans on it is the one
 who runs out of it — the same shape as the circle's growth per diamond, stacking
 all run. It is carried as a duration rather than worked out from a tally of
@@ -386,9 +392,35 @@ reads as a frame that cannot close. It fills both ways from the middle, the way
 the tally along the bottom grows, and the track sits under `kGlowFloor` so an
 empty bar blooms no more than the backdrop does.
 
+The bar *grows* rather than filling more slowly. `squeeze.bar_width` is the
+width of the first fill and the track is that scaled by `World::bar_span`,
+which chases how much dearer this fill has become rather than being read
+straight off `recharge` — so the track runs out to its new length at
+`kBarGrowRate` instead of arriving there. It runs out with the charge at
+zero, there being no filled part yet to stretch along with it, and runs back
+*in* by the same rule when a hexagon settles the wait down. The edge then
+advances at the same pixels a second all run: the
+filled part is the width times `charge`, `charge` climbs at `dt / recharge`,
+and a width proportional to `recharge` cancels the two. What a run has cost
+itself is then a thing on the screen rather than only a thing felt — a bar
+four times the length it started at is the run saying so. `kBarMaxWidth` is
+where it stops growing, since it cannot run past the window; past there the
+fill does slow again, which is the same bargain `kRechargeCeil` makes one
+line up from here.
+
+A grab also *handles* differently. `move_square()` scales its three numbers
+while `Phase::Squeeze` is running — `squeeze.grip_acceleration` and
+`squeeze.grip_friction` up, `squeeze.grip_speed` down — so the frame answers
+harder, settles harder and tops out lower, which together read as precision.
+They are multiples of the square's own figures rather than numbers of their
+own, so at 1.0 a grip drives like anything else, and they scale the momentum
+rather than removing it: the frame is carrying a ball somewhere, and one that
+snapped to a stop would read as a cursor.
+
 The whole of the grab is config — `squeeze.close`, `squeeze.warn`,
-`squeeze.crush`, `squeeze.recharge`, `squeeze.recharge_growth` and the bar's
-own `squeeze.bar_width`; what stays in the code is the grip's clearance, its
+`squeeze.crush`, `squeeze.recharge`, `squeeze.recharge_growth`, the three
+`grip_*` figures above and the bar's own `squeeze.bar_width`; what stays in
+the code is the grip's clearance, its
 rattle, the bar's height and place, and `kRechargeCeil`. The bar sits above the lives row, and `diamond.edge_margin_y` is what
 keeps the pickups off both of them, so moving either means moving that too.
 
@@ -605,8 +637,14 @@ before and after each tick, and any change of side (the ball crossing out, or
 the player driving an edge into it while it is out there) runs the same
 `Phase::Shake` a moving wall does in `Play`. That is why the shake sends you
 back to `StarSeek` rather than `Play` when a star is still out: the chase is
-interrupted, not cancelled. `StarLook` and `StarHold` run the same check, since the square is
-still the player's to drive while the ball sits there.
+interrupted, not cancelled. `StarLook` runs the same check, since the square is still the player's to
+drive while the ball sits there. `StarHold` is the exception, and the only
+one: a wall may pass over the ball there for nothing. The hold is what asks
+the player to bring the frame out to the ball, and checks for exactly that
+when the star lets go, so charging for the crossing would be charging for the
+thing being demanded — a ball sat on a spinning star cannot dodge, and there
+is no way to get the frame around it that does not cross it. A hazard still
+lands there, with the ring still in its way.
 
 `home_ball()` snaps on the final step, so the centers land exactly on top of
 each other rather than orbiting the target. The trip out runs at

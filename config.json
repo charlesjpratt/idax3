@@ -27,7 +27,14 @@
     "crush": 1.8,   // seconds of shaking after that before the grip has it
     "recharge": 6,          // seconds the bar takes to fill before it can grab again
     "recharge_growth": 1.8, // how much dearer each fill makes the next; 1.0 never changes
-    "bar_width": 160        // how wide the bar is drawn, centered along the top
+    "bar_width": 160,       // how wide the FIRST fill draws; later, dearer ones grow from it
+    // How the frame handles while it has hold of the ball. It is being asked to
+    // put the ball somewhere, so it answers and settles harder than open driving
+    // and tops out lower, which together read as precision. These scale the
+    // momentum rather than removing it: at 1.0 a grip drives like anything else.
+    "grip_speed": 0.55,        // of square.speed, the grip's own top speed
+    "grip_acceleration": 3.2,  // of square.acceleration, how hard it answers
+    "grip_friction": 3.2       // of square.friction, how hard it settles
   },
   "circle": {
     "diameter": 35,
