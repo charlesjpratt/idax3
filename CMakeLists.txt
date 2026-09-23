@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 # The version here is the one the title screen shows, so a release is cut by
 # bumping it and tagging the same number.
-project(Bouncer_CPP VERSION 1.1.0 LANGUAGES CXX)
+project(Bouncer_CPP VERSION 1.2.0 LANGUAGES CXX)
 
 # Vendored deps still declare old cmake_minimum_required values — required when
 # building with CMake 4.x.
